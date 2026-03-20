@@ -1,10 +1,11 @@
 using Godot;
+using MonkeNet.Client;
 using MonkeNet.NetworkMessages;
 using System.Collections.Generic;
 
 namespace MonkeNet.Shared;
 
-public abstract partial class EntitySpawner : Node
+public partial class EntitySpawner : Node
 {
     public const int AuthorityServer = 0;
 
@@ -12,9 +13,6 @@ public abstract partial class EntitySpawner : Node
 
     public static EntitySpawner Instance { get; private set; }
     public List<INetworkedEntity> Entities { get; private set; } = []; //TODO: make dictionary for easier access
-
-    protected abstract Node3D HandleEntityCreationClientSide(EntityEventMessage @event);
-    protected abstract Node3D HandleEntityCreationServerSide(EntityEventMessage @event);
 
     public override void _Ready()
     {
@@ -36,16 +34,28 @@ public abstract partial class EntitySpawner : Node
     }
 
     // Can be called from both the server or a client, so it needs to handle both scenarios
-    public Node3D SpawnEntity(EntityEventMessage @event)
+    public Node SpawnEntity(EntityEventMessage @event)
     {
-        Node3D instancedNode;
+        EntitySpawnConfiguration spawnConfiguration =
+            MonkeNetConfig.Instance.GetSpawnConfigurationForEntityType(@event.EntityType);
+
+        Node instancedNode;
         if (MonkeNetManager.Instance.IsServer)
         {
-            instancedNode = HandleEntityCreationServerSide(@event);
+            spawnConfiguration.ServerScene.Instantiate();
+            instancedNode = spawnConfiguration.ServerScene.Instantiate();
         }
         else
         {
-            instancedNode = HandleEntityCreationClientSide(@event);
+            spawnConfiguration.ClientAuthorityScene.Instantiate();
+            if (@event.Authority == ClientManager.Instance.GetNetworkId())
+            {
+                instancedNode = spawnConfiguration.ClientAuthorityScene.Instantiate();
+            }
+            else
+            {
+                instancedNode = spawnConfiguration.ClientDummyScene.Instantiate();
+            }
         }
 
         if (instancedNode is not INetworkedEntity networkedEntity)

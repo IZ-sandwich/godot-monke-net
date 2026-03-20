@@ -7,6 +7,7 @@ public partial class MonkeNetManager : Node
 {
     public static MonkeNetManager Instance { get; private set; }
     public bool IsServer { get; private set; } = false;
+    public EntitySpawner EntitySpawner { get; private set; }
     public Rid PhysicsSpace { get; private set; }
 
     private INetworkManager _networkManager;
@@ -24,7 +25,8 @@ public partial class MonkeNetManager : Node
         if (MonkeNetConfig.Instance == null)
             throw new MonkeNetException("Missing MonkeNetConfig instance!");
 
-        _networkManager = GetNode("NetworkManagerEnet") as INetworkManager;
+        _networkManager = GetNode<INetworkManager>("NetworkManagerEnet");
+        EntitySpawner = GetNode<EntitySpawner>("EntitySpawner");
     }
 
     public void CreateClient(string address, int port)

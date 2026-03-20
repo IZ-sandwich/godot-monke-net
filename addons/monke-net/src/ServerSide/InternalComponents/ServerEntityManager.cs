@@ -19,7 +19,7 @@ public partial class ServerEntityManager : InternalServerComponent
 
     public override void _EnterTree()
     {
-        _entitySpawner = MonkeNetConfig.Instance.EntitySpawner;
+        _entitySpawner = MonkeNetManager.Instance.EntitySpawner;
     }
 
     public void SendSnapshotData(int currentTick)

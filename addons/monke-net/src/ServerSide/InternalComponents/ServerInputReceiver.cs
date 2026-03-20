@@ -42,7 +42,7 @@ public partial class ServerInputReceiver : InternalServerComponent
             return;
 
         // Find the ServerEntity target for this input command
-        foreach (var entity in MonkeNetConfig.Instance.EntitySpawner.Entities)
+        foreach (var entity in MonkeNetManager.Instance.EntitySpawner.Entities)
         {
             if (entity is IServerSyncedEntity serverEntity && clientId == serverEntity.Authority)
             {

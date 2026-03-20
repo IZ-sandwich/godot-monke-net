@@ -3,8 +3,18 @@
 [ext_resource type="Script" uid="uid://b26awixuhuq6l" path="res://demo/MainScene.cs" id="1_a3xwa"]
 [ext_resource type="Material" uid="uid://bqguau4l77phy" path="res://demo/map/Obstacles1.tres" id="2_kwgue"]
 [ext_resource type="Script" uid="uid://dnkbivw2aixxo" path="res://addons/monke-net/src/Shared/Nodes/MonkeNetConfig.cs" id="2_rf2cd"]
+[ext_resource type="PackedScene" uid="uid://b8b17u47wg4nh" path="res://demo/players/local_player/LocalPlayer.tscn" id="3_hbc2u"]
 [ext_resource type="Environment" uid="uid://c5xw5iwomn8qo" path="res://demo/map/DefaultEnvironment.tres" id="4_4tv7j"]
-[ext_resource type="Script" uid="uid://b71f06wr0o6iq" path="res://demo/GameEntitySpawner.cs" id="4_7cfa4"]
+[ext_resource type="PackedScene" uid="uid://cfx1rqvxuku42" path="res://demo/players/dummy_player/DummyPlayer.tscn" id="4_torvr"]
+[ext_resource type="PackedScene" uid="uid://hh18mdgclbq6" path="res://demo/players/server_player/ServerPlayer.tscn" id="5_8xkvn"]
+[ext_resource type="Script" uid="uid://1rpyl54svogx" path="res://addons/monke-net/src/Shared/Nodes/Entities/EntitySpawnConfiguration.cs" id="6_p5x2j"]
+
+[sub_resource type="Resource" id="Resource_yvb8b"]
+script = ExtResource("6_p5x2j")
+ClientAuthorityScene = ExtResource("3_hbc2u")
+ClientDummyScene = ExtResource("4_torvr")
+ServerScene = ExtResource("5_8xkvn")
+metadata/_custom_type_script = "uid://1rpyl54svogx"
 
 [sub_resource type="SphereMesh" id="SphereMesh_rf2cd"]
 
@@ -19,9 +29,9 @@ albedo_color = Color(0.344328, 1, 0.126361, 1)
 [node name="MainScene" type="Node3D" unique_id=27712328]
 script = ExtResource("1_a3xwa")
 
-[node name="MonkeNetConfig" type="Node" parent="." unique_id=1801734743 node_paths=PackedStringArray("EntitySpawner")]
+[node name="MonkeNetConfig" type="Node" parent="." unique_id=1801734743]
 script = ExtResource("2_rf2cd")
-EntitySpawner = NodePath("../EntitySpawner")
+EntitySpawnConfiguration = Array[Object]([SubResource("Resource_yvb8b")])
 metadata/_custom_type_script = "uid://dnkbivw2aixxo"
 
 [node name="Menu" type="Control" parent="." unique_id=796659374]
@@ -113,9 +123,6 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7.5, -1, -4)
 use_collision = true
 radius = 1.0
 material = SubResource("StandardMaterial3D_obp5r")
-
-[node name="EntitySpawner" type="Node" parent="." unique_id=1375437158]
-script = ExtResource("4_7cfa4")
 
 [connection signal="pressed" from="Menu/SpawnButton" to="." method="OnSpawnButtonPressed"]
 [connection signal="pressed" from="Menu/HostButton" to="." method="OnHostButtonPressed"]
