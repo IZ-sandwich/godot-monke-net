@@ -36,31 +36,18 @@ public partial class EntitySpawner : Node
     // Can be called from both the server or a client, so it needs to handle both scenarios
     public Node SpawnEntity(EntityEventMessage @event)
     {
-        EntitySpawnConfiguration spawnConfiguration =
-            MonkeNetConfig.Instance.GetSpawnConfigurationForEntityType(@event.EntityType);
+        var config = MonkeNetConfig.Instance
+            .GetSpawnConfigurationForEntityType(@event.EntityType);
 
-        Node instancedNode;
-        if (MonkeNetManager.Instance.IsServer)
-        {
-            spawnConfiguration.ServerScene.Instantiate();
-            instancedNode = spawnConfiguration.ServerScene.Instantiate();
-        }
-        else
-        {
-            spawnConfiguration.ClientAuthorityScene.Instantiate();
-            if (@event.Authority == ClientManager.Instance.GetNetworkId())
-            {
-                instancedNode = spawnConfiguration.ClientAuthorityScene.Instantiate();
-            }
-            else
-            {
-                instancedNode = spawnConfiguration.ClientDummyScene.Instantiate();
-            }
-        }
+        var scene = SolveWhatEntitySceneToSpawn(config, @event);
+
+        var instancedNode = scene?.Instantiate()
+            ?? throw new MonkeNetException($"Couldn't instance entity {@event.EntityType}");
 
         if (instancedNode is not INetworkedEntity networkedEntity)
         {
-            throw new MonkeNetException($"Can't spawn entity that is not a {typeof(INetworkedEntity).Name}");
+            throw new MonkeNetException(
+                $"Can't spawn entity that is not a {nameof(INetworkedEntity)}");
         }
 
         InitializeEntity(instancedNode, networkedEntity, @event);
@@ -68,6 +55,7 @@ public partial class EntitySpawner : Node
         Entities.Add(networkedEntity);
         EmitSignal(SignalName.EntitySpawned, instancedNode);
         networkedEntity.EntitySpawned();
+
         GD.Print($"Spawned entity:{@event.EntityId} ({@event.EntityType}) Auth:{@event.Authority}");
         return instancedNode;
     }
@@ -101,5 +89,18 @@ public partial class EntitySpawner : Node
         entity.EntityType = @event.EntityType;
         entity.Authority = @event.Authority;
         entity.Metadata = @event.Metadata;
+    }
+
+    private PackedScene SolveWhatEntitySceneToSpawn(EntitySpawnConfiguration entitySpawnConfig, EntityEventMessage @event)
+    {
+        if (MonkeNetManager.Instance.IsServer)
+            return entitySpawnConfig.ServerScene;
+
+        bool isAuthority = @event.Authority == ClientManager.Instance.GetNetworkId();
+
+        if (isAuthority)
+            return entitySpawnConfig.ClientAuthorityScene;
+
+        return entitySpawnConfig.ClientDummyScene;
     }
 }
