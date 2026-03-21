@@ -115,8 +115,9 @@ public partial class ClientManager : Node
         return _networkManager.GetNetworkId();
     }
 
-    private void OnLatencyCalculated(int latencyAverageTicks, int jitterAverageTicks)
+    private void OnLatencyCalculated(int currentTick, int latencyAverageTicks, int jitterAverageTicks)
     {
+        GD.Print($"At tick {currentTick}, latency calculations done. Avg. Latency {latencyAverageTicks} ticks, Jitter {jitterAverageTicks}");
         EmitSignal(SignalName.LatencyCalculated, latencyAverageTicks, jitterAverageTicks);
         EmitSignal(SignalName.NetworkReady); //TODO: calculate this in other way, this should only be emmited once and
                                              //right now it will be emitted every time the colck calculates latency
