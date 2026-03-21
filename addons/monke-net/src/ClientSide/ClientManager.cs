@@ -10,137 +10,137 @@ namespace MonkeNet.Client;
 /// </summary>
 public partial class ClientManager : Node
 {
-	[Signal] public delegate void ClientTickEventHandler(int currentTick, int currentRemoteTick);
-	[Signal] public delegate void LatencyCalculatedEventHandler(int latencyAverageTicks, int jitterAverageTicks);
-	[Signal] public delegate void NetworkReadyEventHandler();
+    [Signal] public delegate void ClientTickEventHandler(int currentTick);
+    [Signal] public delegate void LatencyCalculatedEventHandler(int latencyAverageTicks, int jitterAverageTicks);
+    [Signal] public delegate void NetworkReadyEventHandler();
 
-	public delegate void CommandReceivedEventHandler(IPackableMessage command); // Using a C# signal here because the Godot signal wouldn't accept NetworkMessages.IPackableMessage
-	public event CommandReceivedEventHandler CommandReceived;
+    public delegate void CommandReceivedEventHandler(IPackableMessage command); // Using a C# signal here because the Godot signal wouldn't accept NetworkMessages.IPackableMessage
+    public event CommandReceivedEventHandler CommandReceived;
 
-	public static ClientManager Instance { get; private set; }
+    public static ClientManager Instance { get; private set; }
 
-	private INetworkManager _networkManager;
-	private SnapshotInterpolator _snapshotInterpolator;
-	private ClientNetworkClock _clock;
-	private NetworkDebug _networkDebug;
-	private ClientEntityManager _entityManager;
-	private ClientInputManager _inputManager;
-	private PredictionManager _PredictionManager;
+    private INetworkManager _networkManager;
+    private SnapshotInterpolator _snapshotInterpolator;
+    private ClientNetworkClock _clock;
+    private NetworkDebug _networkDebug;
+    private ClientEntityManager _entityManager;
+    private ClientInputManager _inputManager;
+    private PredictionManager _PredictionManager;
 
-	private bool _networkReady = false;
+    private bool _networkReady = false;
 
-	public override void _EnterTree()
-	{
-		Instance = this;
-	}
+    public override void _EnterTree()
+    {
+        Instance = this;
+    }
 
-	public override void _Ready()
-	{
-		_networkDebug = GetNode<NetworkDebug>("NetworkDebug");
-		_clock = GetNode<ClientNetworkClock>("ClientNetworkClock");
-		_snapshotInterpolator = GetNode<SnapshotInterpolator>("SnapshotInterpolator");
-		_entityManager = GetNode<ClientEntityManager>("ClientEntityManager");
-		_inputManager = GetNode<ClientInputManager>("ClientInputManager");
-		_PredictionManager = GetNode<PredictionManager>("PredictionManager");
-	}
+    public override void _Ready()
+    {
+        _networkDebug = GetNode<NetworkDebug>("NetworkDebug");
+        _clock = GetNode<ClientNetworkClock>("ClientNetworkClock");
+        _snapshotInterpolator = GetNode<SnapshotInterpolator>("SnapshotInterpolator");
+        _entityManager = GetNode<ClientEntityManager>("ClientEntityManager");
+        _inputManager = GetNode<ClientInputManager>("ClientInputManager");
+        _PredictionManager = GetNode<PredictionManager>("PredictionManager");
+    }
 
-	public override void _Process(double delta)
-	{
-		DisplayDebugInformation();
-	}
+    public override void _Process(double delta)
+    {
+        DisplayDebugInformation();
+    }
 
-	// TODO: I don't know if manually stepping physics inside _PhysicsProcess is a good idea,
-	// as internally _PhysicsProcess will call _step() and _flush_queries() the same way I'm doing right now...
-	// causing multiple calls to the same PhysicsServer methods
-	public override void _PhysicsProcess(double delta)
-	{
-		// Advance Clock
-		_clock.ProcessTick();
-		int currentTick = _clock.GetCurrentTick();
-		int currentRemoteTick = _clock.GetCurrentRemoteTick();
+    // TODO: I don't know if manually stepping physics inside _PhysicsProcess is a good idea,
+    // as internally _PhysicsProcess will call _step() and _flush_queries() the same way I'm doing right now...
+    // causing multiple calls to the same PhysicsServer methods
+    public override void _PhysicsProcess(double delta)
+    {
+        // Advance Clock
+        _clock.ProcessTick();
+        int currentTick = _clock.GetCurrentTick();
 
-		var input = _inputManager.GenerateAndTransmitInputs(currentRemoteTick);         // Read and send produced input to the server
-		EntitiesCallProcessTick(currentTick, currentRemoteTick, input);                 // Call OnProcessTick on all entities, pass current input so they can simulate
-		EmitSignal(SignalName.ClientTick, currentTick, currentRemoteTick);
+        var input = _inputManager.GenerateAndTransmitInputs(currentTick);         // Read and send produced input to the server
+        EntitiesCallProcessTick(currentTick, input);                 // Call OnProcessTick on all entities, pass current input so they can simulate
+        EmitSignal(SignalName.ClientTick, currentTick);
 
-		PhysicsServer3D.SpaceStep(MonkeNetManager.Instance.PhysicsSpace, PhysicsUtils.DeltaTime);
-		PhysicsServer3D.SpaceFlushQueries(MonkeNetManager.Instance.PhysicsSpace);
+        PhysicsServer3D.SpaceStep(MonkeNetManager.Instance.PhysicsSpace, PhysicsUtils.DeltaTime);
+        PhysicsServer3D.SpaceFlushQueries(MonkeNetManager.Instance.PhysicsSpace);
 
-		_PredictionManager.RegisterPrediction(currentRemoteTick, input);               // Register all local predictions
-	}
+        _PredictionManager.RegisterPrediction(currentTick, input);               // Register all local predictions
+    }
 
-	// Calls OnProcessTick on all entities
-	private static void EntitiesCallProcessTick(int currentTick, int remoteTick, IPackableElement input)
-	{
-		foreach (var node in MonkeNetConfig.Instance.EntitySpawner.Entities)
-		{
-			if (node is IClientEntity clientEntity)
-			{
-				clientEntity.OnProcessTick(currentTick, remoteTick, input);
-			}
-		}
-	}
+    // Calls OnProcessTick on all entities
+    private static void EntitiesCallProcessTick(int currentTick, IPackableElement input)
+    {
+        foreach (var node in MonkeNetManager.Instance.EntitySpawner.Entities)
+        {
+            if (node is IClientEntity clientEntity)
+            {
+                clientEntity.OnProcessTick(currentTick, input);
+            }
+        }
+    }
 
-	public void Initialize(INetworkManager networkManager, string address, int port)
-	{
-		_networkManager = networkManager;
-		_networkDebug.NetworkManager = _networkManager;
+    public void Initialize(INetworkManager networkManager, string address, int port)
+    {
+        _networkManager = networkManager;
+        _networkDebug.NetworkManager = _networkManager;
 
-		_clock.LatencyCalculated += OnLatencyCalculated;
+        _clock.LatencyCalculated += OnLatencyCalculated;
 
-		_networkManager.PacketReceived += OnPacketReceived;
-		_networkManager.CreateClient(address, port);
+        _networkManager.PacketReceived += OnPacketReceived;
+        _networkManager.CreateClient(address, port);
 
-		GD.Print("Client Manager Initialized");
-	}
+        GD.Print("Client Manager Initialized");
+    }
 
-	public void SendCommandToServer(IPackableMessage command, INetworkManager.PacketModeEnum mode, int channel)
-	{
-		byte[] bin = MessageSerializer.Serialize(command);
-		_networkManager.SendBytes(bin, 1, channel, mode);
-	}
+    public void SendCommandToServer(IPackableMessage command, INetworkManager.PacketModeEnum mode, int channel)
+    {
+        byte[] bin = MessageSerializer.Serialize(command);
+        _networkManager.SendBytes(bin, 1, channel, mode);
+    }
 
-	private void OnPacketReceived(long id, byte[] bin)
-	{
-		var command = MessageSerializer.Deserialize(bin);
-		CommandReceived?.Invoke(command);
-	}
+    private void OnPacketReceived(long id, byte[] bin)
+    {
+        var command = MessageSerializer.Deserialize(bin);
+        CommandReceived?.Invoke(command);
+    }
 
-	public void MakeEntityRequest(byte entityType) //TODO: This should NOT be here
-	{
-		_entityManager.MakeEntityRequest(entityType);
-	}
+    public void MakeEntityRequest(byte entityType) //TODO: This should NOT be here
+    {
+        _entityManager.MakeEntityRequest(entityType);
+    }
 
-	public int GetNetworkId()
-	{
-		return _networkManager.GetNetworkId();
-	}
+    public int GetNetworkId()
+    {
+        return _networkManager.GetNetworkId();
+    }
 
-	private void OnLatencyCalculated(int latencyAverageTicks, int jitterAverageTicks)
-	{
-		EmitSignal(SignalName.LatencyCalculated, latencyAverageTicks, jitterAverageTicks);
-		EmitSignal(SignalName.NetworkReady); //TODO: calculate this in other way, this should only be emmited once and
-											 //right now it will be emitted every time the colck calculates latency
-		_networkReady = true;
-	}
+    private void OnLatencyCalculated(int currentTick, int latencyAverageTicks, int jitterAverageTicks)
+    {
+        GD.Print($"At tick {currentTick}, latency calculations done. Avg. Latency {latencyAverageTicks} ticks, Jitter {jitterAverageTicks}");
+        EmitSignal(SignalName.LatencyCalculated, latencyAverageTicks, jitterAverageTicks);
+        EmitSignal(SignalName.NetworkReady); //TODO: calculate this in other way, this should only be emmited once and
+                                             //right now it will be emitted every time the colck calculates latency
+        _networkReady = true;
+    }
 
-	private void DisplayDebugInformation()
-	{
-		ImGui.SetNextWindowPos(System.Numerics.Vector2.Zero);
-		if (ImGui.Begin("Client Information",
-				ImGuiWindowFlags.NoMove
-				| ImGuiWindowFlags.NoResize
-				| ImGuiWindowFlags.AlwaysAutoResize))
-		{
-			ImGui.Text($"Network ID {Multiplayer.GetUniqueId()}");
-			ImGui.Text($"Framerate {Engine.GetFramesPerSecond()}fps");
-			ImGui.Text($"Physics Tick {Engine.PhysicsTicksPerSecond}hz");
-			_clock.DisplayDebugInformation();
-			_networkDebug.DisplayDebugInformation();
-			_snapshotInterpolator.DisplayDebugInformation();
-			_inputManager.DisplayDebugInformation();
-			_PredictionManager.DisplayDebugInformation();
-			ImGui.End();
-		}
-	}
+    private void DisplayDebugInformation()
+    {
+        ImGui.SetNextWindowPos(System.Numerics.Vector2.Zero);
+        if (ImGui.Begin("Client Information",
+                ImGuiWindowFlags.NoMove
+                | ImGuiWindowFlags.NoResize
+                | ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            ImGui.Text($"Network ID {Multiplayer.GetUniqueId()}");
+            ImGui.Text($"Framerate {Engine.GetFramesPerSecond()}fps");
+            ImGui.Text($"Physics Tick {Engine.PhysicsTicksPerSecond}hz");
+            _clock.DisplayDebugInformation();
+            _networkDebug.DisplayDebugInformation();
+            _snapshotInterpolator.DisplayDebugInformation();
+            _inputManager.DisplayDebugInformation();
+            _PredictionManager.DisplayDebugInformation();
+            ImGui.End();
+        }
+    }
 }

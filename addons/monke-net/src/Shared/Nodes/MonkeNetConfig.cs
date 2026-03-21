@@ -1,14 +1,14 @@
 using Godot;
 using MonkeNet.Client;
-using MonkeNet.Shared;
+using System.Linq;
 
-namespace MonkeNet;
+namespace MonkeNet.Shared;
 
 /// <summary>
 /// Main MonkeNet configuration singleton.
 /// </summary>
 [GlobalClass, Icon("res://addons/monke-net/resources/circle_nodes_solid.png")]
-public partial class MonkeNetConfig : Node
+public partial class MonkeNetConfig : MonkeNetNode
 {
     public static MonkeNetConfig Instance { get; set; } = null;
 
@@ -16,7 +16,7 @@ public partial class MonkeNetConfig : Node
     /// <summary>
     /// Controls how different entities are spawned on both the client and server.
     /// </summary>
-    [Export] public EntitySpawner EntitySpawner { get; set; }
+    [Export] public Godot.Collections.Array<EntitySpawnConfiguration> EntitySpawnConfiguration { get; set; }
 
     [ExportGroup("Client")]
     /// <summary>
@@ -39,5 +39,12 @@ public partial class MonkeNetConfig : Node
     {
         if (Instance != null) { throw new MonkeNetException($"There are multiple {typeof(MonkeNetConfig).Name} instances!"); }
         Instance = this;
+    }
+
+    public EntitySpawnConfiguration GetSpawnConfigurationForEntityType(byte type)
+    {
+        return EntitySpawnConfiguration
+            .FirstOrDefault(conf => conf.EntityType == type)
+            ?? throw new MonkeNetException($"Entity configuration not found for {type}");
     }
 }

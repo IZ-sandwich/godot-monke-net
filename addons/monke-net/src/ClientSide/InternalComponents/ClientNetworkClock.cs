@@ -14,7 +14,7 @@ namespace MonkeNet.Client;
 public partial class ClientNetworkClock : InternalClientComponent
 {
     // Called every time latency is calculated
-    [Signal] public delegate void LatencyCalculatedEventHandler(int latencyAverageTicks, int jitterAverageTicks);
+    [Signal] public delegate void LatencyCalculatedEventHandler(int currentTick, int latencyAverageTicks, int jitterAverageTicks);
 
     [Export] private int _sampleSize = 11;
     [Export] private float _sampleRateMs = 1000;
@@ -55,11 +55,6 @@ public partial class ClientNetworkClock : InternalClientComponent
 
     public int GetCurrentTick()
     {
-        return _currentTick;
-    }
-
-    public int GetCurrentRemoteTick()
-    {
         return _currentTick + _averageLatencyInTicks + _jitterInTicks + _fixedTickMargin;
     }
 
@@ -92,9 +87,7 @@ public partial class ClientNetworkClock : InternalClientComponent
             _jitterInTicks = _latencyValues[^1] - _latencyValues[0];
             _averageLatencyInTicks = SmoothAverage(_latencyValues, _minLatencyInTicks);
 
-            EmitSignal(SignalName.LatencyCalculated, _averageLatencyInTicks, _jitterInTicks);
-
-            GD.Print($"At tick {_currentTick}, latency calculations done. Avg. Latency {_averageLatencyInTicks} ticks, Jitter {_jitterInTicks} ticks, Clock Offset {_lastOffset} ticks");
+            EmitSignal(SignalName.LatencyCalculated, GetCurrentTick(), _averageLatencyInTicks, _jitterInTicks);
 
             _offsetValues.Clear();
             _latencyValues.Clear();
@@ -155,8 +148,7 @@ public partial class ClientNetworkClock : InternalClientComponent
     {
         if (ImGui.CollapsingHeader("Network Clock"))
         {
-            ImGui.Text($"Synced Tick {GetCurrentRemoteTick()}");
-            ImGui.Text($"Local Tick {GetCurrentTick()}");
+            ImGui.Text($"Synced Tick {GetCurrentTick()}");
             ImGui.Text($"Immediate Latency {_immediateLatencyMsec}ms");
             ImGui.Text($"Average Latency {_averageLatencyInTicks} ticks");
             ImGui.Text($"Latency Jitter {_jitterInTicks} ticks");

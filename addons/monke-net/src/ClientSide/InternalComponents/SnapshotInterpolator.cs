@@ -13,7 +13,7 @@ namespace MonkeNet.Client;
 [GlobalClass]
 public partial class SnapshotInterpolator : InternalClientComponent
 {
-    [Export] private int _minBufferTime = 3;
+    [Export] private int _minBufferTime = 2;
 
     private const int RecentPast = 0, NextFuture = 1;
     private double _interpolationFactor = 0;
@@ -30,11 +30,12 @@ public partial class SnapshotInterpolator : InternalClientComponent
     public override void _Process(double delta)
     {
         _currentTick += delta / PhysicsUtils.DeltaTime;
-        double tickToProcess = _currentTick - _bufferTime; // (Current tick - _bufferTime) the point in time in the past which we want to render
+        // (Current tick - _bufferTime) the point in time in the past which we want to render
+        double tickToProcess = _currentTick - _bufferTime * 2;
         InterpolateStates(tickToProcess);
     }
 
-    protected override void OnProcessTick(int currentTick, int currentRemoteTick)
+    protected override void OnProcessTick(int currentTick)
     {
         _currentTick = currentTick;
     }
@@ -51,7 +52,7 @@ public partial class SnapshotInterpolator : InternalClientComponent
 
     protected override void OnLatencyCalculated(int latencyAverageTicks, int jitterAverageTicks)
     {
-        SetBufferTime(latencyAverageTicks + jitterAverageTicks);
+        _bufferTime = (jitterAverageTicks + _minBufferTime + latencyAverageTicks);
     }
 
     /* Example:
@@ -70,7 +71,7 @@ public partial class SnapshotInterpolator : InternalClientComponent
         }
 
         // Clear any unwanted (past) states
-        while (_snapshotBuffer.Count > 2 && renderTick > _snapshotBuffer[1].Tick)
+        while (_snapshotBuffer.Count > 2 && _snapshotBuffer[1].Tick < renderTick)
         {
             _snapshotBuffer.RemoveAt(0);
         }
@@ -82,7 +83,6 @@ public partial class SnapshotInterpolator : InternalClientComponent
         double currentRenderPoint = renderTick - pastSnapshot.Tick;     // Where in this "line" we are located based on current clock
 
         _interpolationFactor = currentRenderPoint / diffBetweenStates;  // Where in the line we are represented as a coefficient
-
         var futureStateCount = nextSnapshot.States.Length;
 
         for (int i = 0; i < futureStateCount; i++)
@@ -102,11 +102,6 @@ public partial class SnapshotInterpolator : InternalClientComponent
         }
     }
 
-    public void SetBufferTime(int bufferTime)
-    {
-        _bufferTime = bufferTime + _minBufferTime;
-    }
-
     public void DisplayDebugInformation()
     {
         if (ImGui.CollapsingHeader("Snapshot Interpolator"))
@@ -119,7 +114,7 @@ public partial class SnapshotInterpolator : InternalClientComponent
             ImGui.Text($"Buffer Time {_bufferTime} ticks");
 
             int bufferTimeMs = (int)(_bufferTime * PhysicsUtils.DeltaTime * 1000);
-            ImGui.Text($"World State is {bufferTimeMs}ms in the past");
+            ImGui.Text($"World State is {bufferTimeMs}ms in the past (relative to server state)");
         }
     }
 }

@@ -1,5 +1,6 @@
 ﻿using Godot;
 using MonkeNet.Serializer;
+using MonkeNet.Shared;
 
 namespace MonkeNet.Client;
 

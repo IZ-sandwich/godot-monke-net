@@ -12,7 +12,7 @@ public partial class ClientEntityManager : InternalClientComponent
 
     public override void _EnterTree()
     {
-        _entitySpawner = MonkeNetConfig.Instance.EntitySpawner;
+        _entitySpawner = MonkeNetManager.Instance.EntitySpawner;
     }
 
     /// <summary>

@@ -1,10 +1,14 @@
-[gd_scene load_steps=3 format=3 uid="uid://bchfwceouveq2"]
+[gd_scene format=3 uid="uid://bchfwceouveq2"]
 
-[ext_resource type="Script" path="res://addons/monke-net/src/Shared/MonkeNetManager/MonkeNetManager.cs" id="1_f83ke"]
-[ext_resource type="Script" path="res://addons/monke-net/src/Shared/Network/NetworkManagerEnet.cs" id="2_7pmc0"]
+[ext_resource type="Script" uid="uid://cv53dctuhu2d7" path="res://addons/monke-net/src/Shared/MonkeNetManager/MonkeNetManager.cs" id="1_f83ke"]
+[ext_resource type="Script" uid="uid://s8biim85hf07" path="res://addons/monke-net/src/Shared/Network/NetworkManagerEnet.cs" id="2_7pmc0"]
+[ext_resource type="Script" uid="uid://cimet4feqrbw8" path="res://addons/monke-net/src/Shared/Entities/EntitySpawner.cs" id="3_l3m48"]
 
-[node name="MonkeNetManager" type="Node"]
+[node name="MonkeNetManager" type="Node" unique_id=1124467707]
 script = ExtResource("1_f83ke")
 
-[node name="NetworkManagerEnet" type="Node" parent="."]
+[node name="NetworkManagerEnet" type="Node" parent="." unique_id=1114520146]
 script = ExtResource("2_7pmc0")
+
+[node name="EntitySpawner" type="Node" parent="." unique_id=2015813499]
+script = ExtResource("3_l3m48")
