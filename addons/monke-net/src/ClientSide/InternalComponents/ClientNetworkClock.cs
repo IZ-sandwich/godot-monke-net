@@ -53,11 +53,6 @@ public partial class ClientNetworkClock : InternalClientComponent
         _lastOffset = 0;
     }
 
-    public int GetCurrentTick()
-    {
-        return _currentTick;
-    }
-
     public int GetCurrentRemoteTick()
     {
         return _currentTick + _averageLatencyInTicks + _jitterInTicks + _fixedTickMargin;
@@ -156,7 +151,6 @@ public partial class ClientNetworkClock : InternalClientComponent
         if (ImGui.CollapsingHeader("Network Clock"))
         {
             ImGui.Text($"Synced Tick {GetCurrentRemoteTick()}");
-            ImGui.Text($"Local Tick {GetCurrentTick()}");
             ImGui.Text($"Immediate Latency {_immediateLatencyMsec}ms");
             ImGui.Text($"Average Latency {_averageLatencyInTicks} ticks");
             ImGui.Text($"Latency Jitter {_jitterInTicks} ticks");

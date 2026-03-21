@@ -10,7 +10,7 @@ namespace MonkeNet.Client;
 /// </summary>
 public partial class ClientManager : Node
 {
-    [Signal] public delegate void ClientTickEventHandler(int currentTick, int currentRemoteTick);
+    [Signal] public delegate void ClientTickEventHandler(int currentTick);
     [Signal] public delegate void LatencyCalculatedEventHandler(int latencyAverageTicks, int jitterAverageTicks);
     [Signal] public delegate void NetworkReadyEventHandler();
 
@@ -56,12 +56,11 @@ public partial class ClientManager : Node
     {
         // Advance Clock
         _clock.ProcessTick();
-        int currentTick = _clock.GetCurrentTick();
         int currentRemoteTick = _clock.GetCurrentRemoteTick();
 
         var input = _inputManager.GenerateAndTransmitInputs(currentRemoteTick);         // Read and send produced input to the server
-        EntitiesCallProcessTick(currentTick, currentRemoteTick, input);                 // Call OnProcessTick on all entities, pass current input so they can simulate
-        EmitSignal(SignalName.ClientTick, currentTick, currentRemoteTick);
+        EntitiesCallProcessTick(currentRemoteTick, input);                 // Call OnProcessTick on all entities, pass current input so they can simulate
+        EmitSignal(SignalName.ClientTick, currentRemoteTick);
 
         PhysicsServer3D.SpaceStep(MonkeNetManager.Instance.PhysicsSpace, PhysicsUtils.DeltaTime);
         PhysicsServer3D.SpaceFlushQueries(MonkeNetManager.Instance.PhysicsSpace);
@@ -70,13 +69,13 @@ public partial class ClientManager : Node
     }
 
     // Calls OnProcessTick on all entities
-    private static void EntitiesCallProcessTick(int currentTick, int remoteTick, IPackableElement input)
+    private static void EntitiesCallProcessTick(int currentTick, IPackableElement input)
     {
         foreach (var node in MonkeNetManager.Instance.EntitySpawner.Entities)
         {
             if (node is IClientEntity clientEntity)
             {
-                clientEntity.OnProcessTick(currentTick, remoteTick, input);
+                clientEntity.OnProcessTick(currentTick, input);
             }
         }
     }

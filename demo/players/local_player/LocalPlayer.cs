@@ -18,7 +18,7 @@ public partial class LocalPlayer : CharacterBody3D, IPredictableEntity
     public void EntitySpawned() { }
 
     // Called every physics tick (but synced to network clock)
-    public void OnProcessTick(int tick, int remoteTick, IPackableElement input)
+    public void OnProcessTick(int tick, IPackableElement input)
     {
         _playerMovement.AdvancePhysics((CharacterInputMessage)input);
     }
