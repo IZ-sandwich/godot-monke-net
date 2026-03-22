@@ -6,13 +6,12 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Remove="addons\monke-net\src\ServerSide\NewFolder\**" />
-    <EmbeddedResource Remove="addons\monke-net\src\ServerSide\NewFolder\**" />
-  </ItemGroup>
-  <ItemGroup>
     <None Include=".editorconfig" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="ImGui.NET" Version="1.91.0.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="addons\monke-net\src\ServerSide\Entities\" />
   </ItemGroup>
 </Project>

@@ -92,11 +92,14 @@ public partial class SnapshotInterpolator : InternalClientComponent
                 IEntityStateData futureState = nextSnapshot.States[i];
                 IEntityStateData pastState = pastSnapshot.States[i];
 
-                var entity = EntitySpawner.Instance.GetNodeOrNull<Node>(futureState.EntityId.ToString()); // FIXME: remove GetNode for the love of god
+                NetworkBehaviour networkBehaviour = EntitySpawner.Instance.GetEntityById(futureState.EntityId)
+                    ?? throw new MonkeNetException($"Entity {futureState.EntityId} not found!");
 
-                if (entity != null && entity is IInterpolatedEntity interpolatedEntity)
+                ClientInterpolatedEntity clientInterpolator = networkBehaviour.GetComponent<ClientInterpolatedEntity>();
+
+                if (clientInterpolator != null)
                 {
-                    interpolatedEntity.HandleStateInterpolation(pastState, futureState, (float)_interpolationFactor);
+                    clientInterpolator.HandleStateInterpolation(pastState, futureState, (float)_interpolationFactor);
                 }
             }
         }
