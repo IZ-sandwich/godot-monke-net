@@ -4,6 +4,7 @@ using MonkeNet.NetworkMessages;
 using MonkeNet.Serializer;
 using MonkeNet.Shared;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace MonkeNet.Client;
 
@@ -94,42 +95,32 @@ public partial class ClientNetworkClock : InternalClientComponent
         }
     }
 
-    //FIXME: Can be done with samples.Average() I believe but im too lazy to check
     private static int SimpleAverage(List<int> samples)
     {
-        if (samples.Count <= 0)
-        {
-            return 0;
-        }
-
-        int count = 0;
-        samples.ForEach(s => count += s);
-        return count / samples.Count;
+        return (int)samples.Average();
     }
 
-    private static int SmoothAverage(List<int> samples, int minValue)
+    private static int SmoothAverage(List<int> samplesSorted, int minValue)
     {
-        int sampleSize = samples.Count;
-        int middleValue = samples[samples.Count / 2];
-        int sampleCount = 0;
+        if (samplesSorted == null || samplesSorted.Count == 0)
+            return minValue;
 
-        for (int i = 0; i < sampleSize; i++)
+        int median = samplesSorted[samplesSorted.Count / 2];
+        int threshold = System.Math.Max(2 * median, minValue);
+
+        long sum = 0;
+        int count = 0;
+
+        foreach (var v in samplesSorted)
         {
-            int value = samples[i];
-
-            // If the value is way too high, we discard that value because its probably just a random occurrance
-            if (value > (2 * middleValue) && value > minValue)
+            if (v <= threshold)
             {
-                samples.RemoveAt(i);
-                sampleSize--;
-            }
-            else
-            {
-                sampleCount += value;
+                sum += v;
+                count++;
             }
         }
 
-        return sampleCount / samples.Count;
+        return count == 0 ? median : (int)(sum / count);
     }
 
     //Called every _sampleRateMs
