@@ -1,8 +1,9 @@
-using GameDemo;
 using Godot;
 using MonkeNet.Client;
 using MonkeNet.Serializer;
 using MonkeNet.Shared;
+
+namespace GameDemo;
 
 public partial class LocalPlayerPrediction : ClientPredictedEntity
 {

@@ -1,8 +1,9 @@
-using GameDemo;
 using Godot;
 using MonkeNet.Serializer;
 using MonkeNet.Server;
 using MonkeNet.Shared;
+
+namespace GameDemo;
 
 public partial class PlayerStateSyncronizer : ServerStateSyncronizer
 {

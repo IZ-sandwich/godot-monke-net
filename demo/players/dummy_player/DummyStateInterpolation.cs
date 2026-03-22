@@ -1,7 +1,8 @@
-using GameDemo;
 using Godot;
 using MonkeNet.Client;
 using MonkeNet.Shared;
+
+namespace GameDemo;
 
 public partial class DummyStateInterpolation : ClientInterpolatedEntity
 {
