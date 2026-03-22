@@ -8,6 +8,8 @@
 [ext_resource type="PackedScene" uid="uid://cfx1rqvxuku42" path="res://demo/players/dummy_player/DummyPlayer.tscn" id="4_torvr"]
 [ext_resource type="PackedScene" uid="uid://hh18mdgclbq6" path="res://demo/players/server_player/ServerPlayer.tscn" id="5_8xkvn"]
 [ext_resource type="Script" uid="uid://1rpyl54svogx" path="res://addons/monke-net/src/Shared/Nodes/Entities/EntitySpawnConfiguration.cs" id="6_p5x2j"]
+[ext_resource type="PackedScene" uid="uid://cdm6b7x3omwnr" path="res://demo/ball/LocalBall.tscn" id="7_torvr"]
+[ext_resource type="PackedScene" uid="uid://dr73i1u4dj11g" path="res://demo/ball/ServerBall.tscn" id="9_yvb8b"]
 
 [sub_resource type="Resource" id="Resource_yvb8b"]
 script = ExtResource("6_p5x2j")
@@ -16,12 +18,19 @@ ClientDummyScene = ExtResource("4_torvr")
 ServerScene = ExtResource("5_8xkvn")
 metadata/_custom_type_script = "uid://1rpyl54svogx"
 
-[sub_resource type="SphereMesh" id="SphereMesh_rf2cd"]
-
-[sub_resource type="SphereShape3D" id="SphereShape3D_a814b"]
+[sub_resource type="Resource" id="Resource_3hf6u"]
+script = ExtResource("6_p5x2j")
+EntityType = 1
+ClientAuthorityScene = ExtResource("7_torvr")
+ClientDummyScene = ExtResource("7_torvr")
+ServerScene = ExtResource("9_yvb8b")
+metadata/_custom_type_script = "uid://1rpyl54svogx"
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_lcinv"]
 albedo_color = Color(0.101961, 0.101961, 0.101961, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_8xkvn"]
+albedo_color = Color(0.581943, 0.6945688, 0.2467655, 1)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_obp5r"]
 albedo_color = Color(0.344328, 1, 0.126361, 1)
@@ -31,7 +40,7 @@ script = ExtResource("1_a3xwa")
 
 [node name="MonkeNetConfig" type="Node" parent="." unique_id=1801734743]
 script = ExtResource("2_rf2cd")
-EntitySpawnConfiguration = Array[Object]([SubResource("Resource_yvb8b")])
+EntitySpawnConfiguration = Array[Object]([SubResource("Resource_yvb8b"), SubResource("Resource_3hf6u")])
 metadata/_custom_type_script = "uid://dnkbivw2aixxo"
 
 [node name="Menu" type="Control" parent="." unique_id=796659374]
@@ -49,6 +58,15 @@ offset_right = 602.0
 offset_bottom = 31.0
 text = "Spawn Player"
 
+[node name="SpawnBallButton" type="Button" parent="Menu" unique_id=1672447597]
+layout_mode = 0
+offset_left = 456.0
+offset_top = 31.0
+offset_right = 602.0
+offset_bottom = 62.0
+text = "Spawn Ball
+"
+
 [node name="HostButton" type="Button" parent="Menu" unique_id=2000725900]
 layout_mode = 0
 offset_right = 152.0
@@ -64,15 +82,6 @@ text = "Connect to Server"
 
 [node name="Map" type="Node" parent="." unique_id=719413025]
 
-[node name="RigidBody3D" type="RigidBody3D" parent="Map" unique_id=203137625]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -6.424172, 1.3222408, -1.0746036)
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="Map/RigidBody3D" unique_id=135477484]
-mesh = SubResource("SphereMesh_rf2cd")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Map/RigidBody3D" unique_id=272457805]
-shape = SubResource("SphereShape3D_a814b")
-
 [node name="Floor" type="CSGBox3D" parent="Map" unique_id=961545461]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -2.5, 0)
 use_collision = true
@@ -84,6 +93,30 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -9.5, -1, 0)
 use_collision = true
 size = Vector3(2, 2, 12)
 material = ExtResource("2_kwgue")
+
+[node name="Border1" type="CSGBox3D" parent="Map" unique_id=928081835]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -15.5, -1, 0)
+use_collision = true
+size = Vector3(1, 2, 30)
+material = SubResource("StandardMaterial3D_8xkvn")
+
+[node name="Border2" type="CSGBox3D" parent="Map" unique_id=1720386384]
+transform = Transform3D(-4.371139e-08, 0, 1, 0, 1, 0, -1, 0, -4.371139e-08, -0.5, -1, -15)
+use_collision = true
+size = Vector3(1, 2, 31)
+material = SubResource("StandardMaterial3D_8xkvn")
+
+[node name="Border3" type="CSGBox3D" parent="Map" unique_id=2009876688]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 14.5, -1, 0)
+use_collision = true
+size = Vector3(1, 2, 31)
+material = SubResource("StandardMaterial3D_8xkvn")
+
+[node name="Border4" type="CSGBox3D" parent="Map" unique_id=748852032]
+transform = Transform3D(-4.371139e-08, 0, 1, 0, 1, 0, -1, 0, -4.371139e-08, -0.5, -1, 15)
+use_collision = true
+size = Vector3(1, 2, 31)
+material = SubResource("StandardMaterial3D_8xkvn")
 
 [node name="Wall2" type="CSGBox3D" parent="Map" unique_id=1891960389]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7.5, -1, -1)
@@ -125,5 +158,6 @@ radius = 1.0
 material = SubResource("StandardMaterial3D_obp5r")
 
 [connection signal="pressed" from="Menu/SpawnButton" to="." method="OnSpawnButtonPressed"]
+[connection signal="pressed" from="Menu/SpawnBallButton" to="." method="OnSpawnBallButtonPressed"]
 [connection signal="pressed" from="Menu/HostButton" to="." method="OnHostButtonPressed"]
 [connection signal="pressed" from="Menu/ConnectButton" to="." method="OnConnectButtonPressed"]

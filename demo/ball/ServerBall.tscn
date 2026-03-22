@@ -1,0 +1,26 @@
+[gd_scene format=3 uid="uid://dr73i1u4dj11g"]
+
+[ext_resource type="Script" uid="uid://csxl752qrhj75" path="res://demo/ball/ServerBallNetworkBehaviour.cs" id="1_n0w01"]
+[ext_resource type="Script" uid="uid://88nwa67lqidu" path="res://demo/ball/ServerBallStateSyncronizer.cs" id="2_n0w01"]
+
+[sub_resource type="SphereMesh" id="SphereMesh_rf2cd"]
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_a814b"]
+
+[node name="ServerBall" type="RigidBody3D" unique_id=1602080397]
+collision_layer = 0
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=683380154]
+mesh = SubResource("SphereMesh_rf2cd")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=2065844183]
+shape = SubResource("SphereShape3D_a814b")
+
+[node name="NetworkBehaviour" type="Node" parent="." unique_id=1321597612]
+script = ExtResource("1_n0w01")
+metadata/_custom_type_script = "uid://d4b1e6581aumb"
+
+[node name="ServerStateSyncronizer" type="Node" parent="." unique_id=1324363946 node_paths=PackedStringArray("_rigidBody")]
+script = ExtResource("2_n0w01")
+_rigidBody = NodePath("..")
+metadata/_custom_type_script = "uid://clh4o8hlbokjg"

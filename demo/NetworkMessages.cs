@@ -10,6 +10,8 @@ public struct EntityStateMessage : IEntityStateData
     public int EntityId { get; set; } // Entity Id
     public Vector3 Position { get; set; } // Entity Position
     public Vector3 Velocity { get; set; } // Entity velocity
+    public Vector3 AngularVelocity { get; set; } // Entity velocity
+    public Vector3 Rotation { get; set; }
     public float Yaw { get; set; } // Looking angle
 
     public void ReadBytes(MessageReader reader)
@@ -17,6 +19,8 @@ public struct EntityStateMessage : IEntityStateData
         EntityId = reader.ReadInt32();
         Position = reader.ReadVector3();
         Velocity = reader.ReadVector3();
+        AngularVelocity = reader.ReadVector3();
+        Rotation = reader.ReadVector3();
         Yaw = reader.ReadSingle();
     }
 
@@ -25,6 +29,8 @@ public struct EntityStateMessage : IEntityStateData
         writer.Write(EntityId);
         writer.Write(Position);
         writer.Write(Velocity);
+        writer.Write(AngularVelocity);
+        writer.Write(Rotation);
         writer.Write(Yaw);
     }
 
