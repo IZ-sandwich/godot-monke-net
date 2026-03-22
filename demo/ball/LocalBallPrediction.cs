@@ -17,7 +17,7 @@ public partial class LocalBallPrediction : ClientPredictedEntity
         return _rigidBody.Position;
     }
 
-    public override bool HasMisspredicted(IEntityStateData receivedState, Vector3 savedState)
+    public override bool HasMisspredicted(int tick, IEntityStateData receivedState, Vector3 savedState)
     {
         EntityStateMessage state = (EntityStateMessage)receivedState;
         return (state.Position - savedState).LengthSquared() > _maxDeviationAllowedSquared;
