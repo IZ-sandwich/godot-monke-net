@@ -35,7 +35,7 @@ public partial class SnapshotInterpolator : InternalClientComponent
         InterpolateStates(tickToProcess);
     }
 
-    protected override void OnProcessTick(int currentTick)
+    protected override void OnProcessTick(int currentTick, IPackableElement input)
     {
         _currentTick = currentTick;
     }

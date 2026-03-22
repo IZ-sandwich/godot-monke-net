@@ -1,6 +1,7 @@
 using Godot;
 using MonkeNet.Client;
 using MonkeNet.NetworkMessages;
+using System;
 using System.Collections.Generic;
 
 namespace MonkeNet.Shared;
@@ -12,7 +13,7 @@ public partial class EntitySpawner : Node
     [Signal] public delegate void EntitySpawnedEventHandler(Node3D entity);
 
     public static EntitySpawner Instance { get; private set; }
-    public List<INetworkedEntity> Entities { get; private set; } = []; //TODO: make dictionary for easier access
+    public List<NetworkBehaviour> Entities { get; private set; } = []; //TODO: make dictionary for easier access
 
     public override void _Ready()
     {
@@ -20,11 +21,11 @@ public partial class EntitySpawner : Node
     }
 
     //TODO: do not cast, make Entities a list of INetworkedEntity directly
-    public INetworkedEntity GetEntityById(int entityId)
+    public NetworkBehaviour GetEntityById(int entityId)
     {
         for (int i = 0; i < Entities.Count; i++)
         {
-            if (Entities[i] is INetworkedEntity networkedEntity && networkedEntity.EntityId == entityId)
+            if (Entities[i] is NetworkBehaviour networkedEntity && networkedEntity.EntityId == entityId)
             {
                 return networkedEntity;
             }
@@ -41,30 +42,28 @@ public partial class EntitySpawner : Node
 
         var scene = SolveWhatEntitySceneToSpawn(config, @event);
 
-        var instancedNode = scene?.Instantiate()
+        var instance = scene?.Instantiate()
             ?? throw new MonkeNetException($"Couldn't instance entity {@event.EntityType}");
 
-        if (instancedNode is not INetworkedEntity networkedEntity)
-        {
-            throw new MonkeNetException(
-                $"Can't spawn entity that is not a {nameof(INetworkedEntity)}");
-        }
+        NetworkBehaviour networkBehaviour = MonkeNetComponents.GetComponent<NetworkBehaviour>(instance)
+            ?? throw new MonkeNetException($"Can't spawn entity that doesn't have a {nameof(NetworkBehaviour)} node!");
 
-        InitializeEntity(instancedNode, networkedEntity, @event);
-        AddChild(instancedNode);
-        Entities.Add(networkedEntity);
-        EmitSignal(SignalName.EntitySpawned, instancedNode);
-        networkedEntity.EntitySpawned();
+        InitializeEntity(instance, networkBehaviour, @event);
+        AddChild(instance);
+        Entities.Add(networkBehaviour);
+        EmitSignal(SignalName.EntitySpawned, instance);
+        networkBehaviour.OnEntitySpawned();
 
         GD.Print($"Spawned entity:{@event.EntityId} ({@event.EntityType}) Auth:{@event.Authority}");
-        return instancedNode;
+        return instance;
     }
 
     public void DestroyEntity(EntityEventMessage @event)
     {
-        var entity = GetNode<INetworkedEntity>(@event.EntityId.ToString());
-        entity.Free();
-        Entities.Remove(entity);
+        //    var entity = GetNode<NetworkBehaviour>(@event.EntityId.ToString());
+        //    entity.Free();
+        //    Entities.Remove(entity);
+        throw new NotImplementedException();
     }
 
     public List<int> GetAllEntitiesByAuthority(int authority)
@@ -82,7 +81,7 @@ public partial class EntitySpawner : Node
         return entitiesGeneratedByAuthority;
     }
 
-    private static void InitializeEntity(Node node, INetworkedEntity entity, EntityEventMessage @event)
+    private static void InitializeEntity(Node node, NetworkBehaviour entity, EntityEventMessage @event)
     {
         node.Name = @event.EntityId.ToString();
         entity.EntityId = @event.EntityId;

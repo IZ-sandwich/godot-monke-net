@@ -58,12 +58,13 @@ public partial class ServerEntityManager : InternalServerComponent
     private GameSnapshotMessage PackSnapshot(int currentTick)
     {
         // Solve which entities we should include in this snapshot
-        List<IServerSyncedEntity> includedEntities = [];
-        foreach (INetworkedEntity entity in _entitySpawner.Entities)
+        List<ServerStateSyncronizer> includedEntities = [];
+        foreach (NetworkBehaviour entity in _entitySpawner.Entities)
         {
-            if (entity is IServerSyncedEntity serverEntity)
+            var serverStateSyncronizer = entity.GetComponent<ServerStateSyncronizer>();
+            if (serverStateSyncronizer != null)
             {
-                includedEntities.Add(serverEntity);
+                includedEntities.Add(serverStateSyncronizer);
             }
         }
 
@@ -79,7 +80,7 @@ public partial class ServerEntityManager : InternalServerComponent
 
         for (int i = 0; i < entityCount; i++)
         {
-            snapshot.States[i] = includedEntities[i].GenerateCurrentStateMessage();
+            snapshot.States[i] = includedEntities[i].PackEntityState();
         }
 
         return snapshot;
@@ -140,7 +141,7 @@ public partial class ServerEntityManager : InternalServerComponent
     /// <param name="clientId"></param>
     private void SyncWorldState(int clientId)
     {
-        foreach (INetworkedEntity entity in _entitySpawner.Entities)
+        foreach (NetworkBehaviour entity in _entitySpawner.Entities)
         {
             var entityEvent = new EntityEventMessage
             {

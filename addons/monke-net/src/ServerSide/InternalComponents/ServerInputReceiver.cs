@@ -10,12 +10,12 @@ namespace MonkeNet.Server;
 [GlobalClass]
 public partial class ServerInputReceiver : InternalServerComponent
 {
-    private readonly Dictionary<int, Dictionary<IServerSyncedEntity, IPackableElement>> _pendingInputs = [];
-    private readonly Dictionary<IServerSyncedEntity, IPackableElement> _lastInputStored = []; // Used for re-running old inputs in case no new inputs are received
+    private readonly Dictionary<int, Dictionary<NetworkBehaviour, IPackableElement>> _pendingInputs = [];
+    private readonly Dictionary<NetworkBehaviour, IPackableElement> _lastInputStored = []; // Used for re-running old inputs in case no new inputs are received
 
     private int _missedInput = 0;
 
-    public IPackableElement GetInputForEntityTick(IServerSyncedEntity serverEntity, int tick)
+    public IPackableElement GetInputForEntityTick(NetworkBehaviour serverEntity, int tick)
     {
         // TODO: use something else, not try/catch
         try
@@ -48,14 +48,14 @@ public partial class ServerInputReceiver : InternalServerComponent
         // Find the ServerEntity target for this input command
         foreach (var entity in MonkeNetManager.Instance.EntitySpawner.Entities)
         {
-            if (entity is IServerSyncedEntity serverEntity && clientId == serverEntity.Authority)
+            if (entity is NetworkBehaviour serverEntity && clientId == serverEntity.Authority)
             {
                 RegisterCommand(serverEntity, inputCommand);
             }
         }
     }
 
-    private void RegisterCommand(IServerSyncedEntity serverEntity, PackedClientInputMessage inputCommand)
+    private void RegisterCommand(NetworkBehaviour serverEntity, PackedClientInputMessage inputCommand)
     {
         int offset = inputCommand.Inputs.Length - 1;
         foreach (IPackableElement input in inputCommand.Inputs)
@@ -63,7 +63,7 @@ public partial class ServerInputReceiver : InternalServerComponent
             int tick = inputCommand.Tick - (offset--);
 
             // Check if we have an entry for this tick
-            if (!_pendingInputs.TryGetValue(tick, out Dictionary<IServerSyncedEntity, IPackableElement> value))
+            if (!_pendingInputs.TryGetValue(tick, out Dictionary<NetworkBehaviour, IPackableElement> value))
             {
                 value = ([]);
                 _pendingInputs.Add(tick, value);

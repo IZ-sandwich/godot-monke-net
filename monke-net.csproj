@@ -6,6 +6,10 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="addons\monke-net\src\ServerSide\NewFolder\**" />
+    <EmbeddedResource Remove="addons\monke-net\src\ServerSide\NewFolder\**" />
+  </ItemGroup>
+  <ItemGroup>
     <None Include=".editorconfig" />
   </ItemGroup>
   <ItemGroup>

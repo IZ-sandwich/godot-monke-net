@@ -5,7 +5,7 @@ using MonkeNet.Shared;
 namespace GameDemo;
 
 // Dummy player (other players in the game)
-public partial class DummyPlayer : Node3D, INetworkedEntity, IInterpolatedEntity
+public partial class DummyPlayer : Node3D, IInterpolatedEntity
 {
     [Export] private Node3D _skeleton;
     [Export] private AnimationTree _animTree;

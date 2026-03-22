@@ -1,15 +1,26 @@
 [gd_scene format=3 uid="uid://hh18mdgclbq6"]
 
 [ext_resource type="Script" uid="uid://c17et2fp804qw" path="res://demo/players/server_player/ServerPlayer.cs" id="1_cinm7"]
+[ext_resource type="Script" uid="uid://d1s13gohhhcre" path="res://demo/players/server_player/PlayerStateSyncronizer.cs" id="2_c683x"]
 [ext_resource type="Script" uid="uid://cnv1cfcupuk13" path="res://demo/players/SharedPlayerMovement.cs" id="2_miufo"]
+[ext_resource type="Script" uid="uid://d4b1e6581aumb" path="res://addons/monke-net/src/Shared/Nodes/NetworkBehaviour.cs" id="2_rh88y"]
 
 [sub_resource type="CapsuleMesh" id="CapsuleMesh_ysstd"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_ry084"]
 
-[node name="ServerPlayer" type="CharacterBody3D" unique_id=1230422301 node_paths=PackedStringArray("_playerMovement")]
+[node name="ServerPlayer" type="CharacterBody3D" unique_id=1230422301]
 script = ExtResource("1_cinm7")
-_playerMovement = NodePath("SharedPlayerMovement")
+
+[node name="ServerStateSyncronizer" type="Node" parent="." unique_id=954172036 node_paths=PackedStringArray("_characterBody", "_playerMovement")]
+script = ExtResource("2_c683x")
+_characterBody = NodePath("..")
+_playerMovement = NodePath("../SharedPlayerMovement")
+metadata/_custom_type_script = "uid://clh4o8hlbokjg"
+
+[node name="NetworkedEntity" type="Node" parent="." unique_id=941283251]
+script = ExtResource("2_rh88y")
+metadata/_custom_type_script = "uid://d4b1e6581aumb"
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=1461296159]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)

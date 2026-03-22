@@ -84,13 +84,14 @@ public partial class ServerManager : Node
     {
         foreach (var node in MonkeNetManager.Instance.EntitySpawner.Entities)
         {
-            if (node is IServerSyncedEntity serverEntity)
+            if (node is NetworkBehaviour serverEntity)
             {
                 IPackableElement input = _inputReceiver.GetInputForEntityTick(serverEntity, currentTick);
 
-                if (input != null)
+                var serverStateSyncronizer = serverEntity.GetComponent<ServerStateSyncronizer>();
+                if (input != null && serverStateSyncronizer != null)
                 {
-                    serverEntity.OnProcessTick(currentTick, input);
+                    serverStateSyncronizer.OnProcessTick(currentTick, input);
                 }
             }
         }

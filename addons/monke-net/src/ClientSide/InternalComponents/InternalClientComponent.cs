@@ -9,7 +9,7 @@ public abstract partial class InternalClientComponent : Node
 {
     protected virtual void OnCommandReceived(IPackableMessage command) { }
     protected virtual void OnLatencyCalculated(int latencyAverageTicks, int jitterAverageTicks) { }
-    protected virtual void OnProcessTick(int currentTick) { }
+    protected virtual void OnProcessTick(int currentTick, IPackableElement input) { }
 
     private bool _networkReady = false;
 

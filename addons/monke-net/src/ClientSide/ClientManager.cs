@@ -10,12 +10,14 @@ namespace MonkeNet.Client;
 /// </summary>
 public partial class ClientManager : Node
 {
-    [Signal] public delegate void ClientTickEventHandler(int currentTick);
     [Signal] public delegate void LatencyCalculatedEventHandler(int latencyAverageTicks, int jitterAverageTicks);
     [Signal] public delegate void NetworkReadyEventHandler();
 
     public delegate void CommandReceivedEventHandler(IPackableMessage command); // Using a C# signal here because the Godot signal wouldn't accept NetworkMessages.IPackableMessage
     public event CommandReceivedEventHandler CommandReceived;
+
+    public delegate void ClientTickEventHandler(int tick, IPackableElement command); // Using a C# signal here because the Godot signal wouldn't accept NetworkMessages.IPackableMessage
+    public event ClientTickEventHandler ClientTick;
 
     public static ClientManager Instance { get; private set; }
 
@@ -58,9 +60,12 @@ public partial class ClientManager : Node
         _clock.ProcessTick();
         int currentTick = _clock.GetCurrentTick();
 
-        var input = _inputManager.GenerateAndTransmitInputs(currentTick);         // Read and send produced input to the server
-        EntitiesCallProcessTick(currentTick, input);                 // Call OnProcessTick on all entities, pass current input so they can simulate
-        EmitSignal(SignalName.ClientTick, currentTick);
+        // Read and send produced input to the server
+        var input = _inputManager.GenerateAndTransmitInputs(currentTick);
+
+        // Call OnProcessTick on all entities, pass current input so they can simulate
+        EntitiesCallProcessTick(currentTick, input);
+        ClientTick?.Invoke(currentTick, input);
 
         PhysicsServer3D.SpaceStep(MonkeNetManager.Instance.PhysicsSpace, PhysicsUtils.DeltaTime);
         PhysicsServer3D.SpaceFlushQueries(MonkeNetManager.Instance.PhysicsSpace);
@@ -68,14 +73,14 @@ public partial class ClientManager : Node
         _PredictionManager.RegisterPrediction(currentTick, input);               // Register all local predictions
     }
 
-    // Calls OnProcessTick on all entities
     private static void EntitiesCallProcessTick(int currentTick, IPackableElement input)
     {
         foreach (var node in MonkeNetManager.Instance.EntitySpawner.Entities)
         {
-            if (node is IClientEntity clientEntity)
+            var predic = node.GetComponent<ClientPredictedEntity>();
+            if (predic != null)
             {
-                clientEntity.OnProcessTick(currentTick, input);
+                predic.OnProcessTick(currentTick, input);
             }
         }
     }
