@@ -33,6 +33,15 @@ public partial class ClientPredictionManager : InternalClientComponent
         }
     }
 
+    public void Predict(int tick, IPackableElement input)
+    {
+        MonkeNetManager.Instance.EntitySpawner.Entities.ForEach(entity =>
+        {
+            var clientPredictedEntity = entity.GetComponent<ClientPredictedEntity>();
+            clientPredictedEntity?.OnProcessTick(tick, input);
+        });
+    }
+
     public void RegisterPrediction(int tick, IPackableElement input)
     {
         var predictedState = new PredictedState

@@ -64,26 +64,13 @@ public partial class ClientManager : Node
         var input = _inputManager.GenerateAndTransmitInputs(currentTick);
 
         // Call OnProcessTick on all entities, pass current input so they can simulate
-        EntitiesCallProcessTick(currentTick, input);
+        _predictionManager.Predict(currentTick, input);
         ClientTick?.Invoke(currentTick, input);
 
         PhysicsServer3D.SpaceStep(MonkeNetManager.Instance.PhysicsSpace, PhysicsUtils.DeltaTime);
         PhysicsServer3D.SpaceFlushQueries(MonkeNetManager.Instance.PhysicsSpace);
 
         _predictionManager.RegisterPrediction(currentTick, input);               // Register all local predictions
-    }
-
-    //TODO: this is crap
-    private static void EntitiesCallProcessTick(int currentTick, IPackableElement input)
-    {
-        foreach (var node in MonkeNetManager.Instance.EntitySpawner.Entities)
-        {
-            var predic = node.GetComponent<ClientPredictedEntity>();
-            if (predic != null)
-            {
-                predic.OnProcessTick(currentTick, input);
-            }
-        }
     }
 
     public void Initialize(INetworkManager networkManager, string address, int port)
