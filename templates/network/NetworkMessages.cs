@@ -8,14 +8,14 @@ namespace YourGame;
 
 public struct PlayerInputMessage : IPackableElement
 {
-    // Bit flags for binary actions only. Add your own values as needed.
+    // Bit flags for binary actions. Add your own values to PlayerAction below.
     public byte Actions { get; set; }
 
     // Analog movement axes: -1..1. Keyboard produces -1/0/1; controller stick produces analog values.
     public float MoveX { get; set; }
     public float MoveY { get; set; }
 
-    // Camera orientation, sent each tick so the server knows where the player is looking.
+    // Camera orientation sent each tick so the server knows where the player is looking.
     public float CameraYaw { get; set; }
     public float CameraPitch { get; set; }
 
@@ -44,7 +44,7 @@ public struct VehicleInputMessage : IPackableElement
 {
     public float Steering { get; set; }  // -1..1
     public float Throttle { get; set; }  // 0..1
-    public float Brake { get; set; }     // 0..1
+    public float Brake    { get; set; }  // 0..1
     public bool Handbrake { get; set; }
 
     public readonly void WriteBytes(MessageWriter writer)
@@ -57,24 +57,24 @@ public struct VehicleInputMessage : IPackableElement
 
     public void ReadBytes(MessageReader reader)
     {
-        Steering = reader.ReadSingle();
-        Throttle = reader.ReadSingle();
-        Brake = reader.ReadSingle();
+        Steering  = reader.ReadSingle();
+        Throttle  = reader.ReadSingle();
+        Brake     = reader.ReadSingle();
         Handbrake = reader.ReadBoolean();
     }
 
     public readonly IPackableElement GetCopy() => this;
 }
 
-// ── State messages (server → all clients, inside each snapshot) ─────────────
+// ── State messages (server → all clients, packed inside each snapshot) ───────
 
 public struct PlayerStateMessage : IEntityStateData
 {
-    public int EntityId { get; set; }
+    public int     EntityId { get; set; }
     public Vector3 Position { get; set; }
     public Vector3 Velocity { get; set; }
-    public float Yaw { get; set; }
-    public float Pitch { get; set; }
+    public float   Yaw      { get; set; }
+    public float   Pitch    { get; set; }
 
     public readonly void WriteBytes(MessageWriter writer)
     {
@@ -90,24 +90,22 @@ public struct PlayerStateMessage : IEntityStateData
         EntityId = reader.ReadInt32();
         Position = reader.ReadVector3();
         Velocity = reader.ReadVector3();
-        Yaw = reader.ReadSingle();
-        Pitch = reader.ReadSingle();
+        Yaw      = reader.ReadSingle();
+        Pitch    = reader.ReadSingle();
     }
 
     public readonly IPackableElement GetCopy() => this;
 }
 
-// Shared by both physics props and vehicles — anything that needs full 3D rigid-body state.
+// Shared by physics props and vehicles — anything that needs full 3D rigid-body state.
 public struct PhysicsStateMessage : IEntityStateData
 {
-    public int EntityId { get; set; }
-    public Vector3 Position { get; set; }
-    public Quaternion Rotation { get; set; }
-    public Vector3 LinearVelocity { get; set; }
-    public Vector3 AngularVelocity { get; set; }
-
-    // When false the server body is sleeping; clients can skip correction that tick.
-    public bool IsAwake { get; set; }
+    public int        EntityId        { get; set; }
+    public Vector3    Position        { get; set; }
+    public Quaternion Rotation        { get; set; }
+    public Vector3    LinearVelocity  { get; set; }
+    public Vector3    AngularVelocity { get; set; }
+    public bool       IsAwake         { get; set; }
 
     public readonly void WriteBytes(MessageWriter writer)
     {
@@ -121,12 +119,12 @@ public struct PhysicsStateMessage : IEntityStateData
 
     public void ReadBytes(MessageReader reader)
     {
-        EntityId = reader.ReadInt32();
-        Position = reader.ReadVector3();
-        Rotation = reader.ReadQuaternion();
-        LinearVelocity = reader.ReadVector3();
+        EntityId        = reader.ReadInt32();
+        Position        = reader.ReadVector3();
+        Rotation        = reader.ReadQuaternion();
+        LinearVelocity  = reader.ReadVector3();
         AngularVelocity = reader.ReadVector3();
-        IsAwake = reader.ReadBoolean();
+        IsAwake         = reader.ReadBoolean();
     }
 
     public readonly IPackableElement GetCopy() => this;
@@ -140,7 +138,7 @@ public enum PlayerAction : byte
     Crouch   = 0b_0000_0010,
     Interact = 0b_0000_0100,
     Sprint   = 0b_0000_1000,
-    // Add more as needed (up to 8 total in a byte)
+    // Up to 8 total in a byte — add more as needed.
 }
 
 public static class InputHelper

@@ -37,20 +37,8 @@ public partial class EntitySpawner : Node
     // Can be called from both the server or a client, so it needs to handle both scenarios
     public Node SpawnEntity(EntityEventMessage @event)
     {
-<<<<<<< HEAD
         var config = MonkeNetConfig.Instance
             .GetSpawnConfigurationForEntityType(@event.EntityType);
-=======
-        Node3D instancedNode;
-        if (MonkeNetManager.Instance.IsServer())
-        {
-            instancedNode = HandleEntityCreationServerSide(@event);
-        }
-        else
-        {
-            instancedNode = HandleEntityCreationClientSide(@event);
-        }
->>>>>>> 64c2104 (initial commit making templates for co-op game)
 
         var scene = SolveWhatEntitySceneToSpawn(config, @event);
 

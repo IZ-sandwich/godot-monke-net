@@ -80,18 +80,14 @@ offset_right = 152.0
 offset_bottom = 63.0
 text = "Connect to Server"
 
-<<<<<<< HEAD
-[node name="Map" type="Node" parent="." unique_id=719413025]
-=======
-[node name="HostAndConnectButton" type="Button" parent="Menu"]
+[node name="HostAndConnectButton" type="Button" parent="Menu" unique_id=1890646881]
 layout_mode = 0
 offset_top = 62.0
 offset_right = 152.0
 offset_bottom = 93.0
 text = "Host and Connect"
 
-[node name="Map" type="Node" parent="."]
->>>>>>> 64c2104 (initial commit making templates for co-op game)
+[node name="Map" type="Node" parent="." unique_id=719413025]
 
 [node name="Floor" type="CSGBox3D" parent="Map" unique_id=961545461]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -2.5, 0)

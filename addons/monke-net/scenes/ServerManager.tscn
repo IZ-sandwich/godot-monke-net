@@ -1,26 +1,26 @@
-[gd_scene load_steps=5 format=3 uid="uid://bog1us6frffkj"]
+[gd_scene format=3 uid="uid://bog1us6frffkj"]
 
 [ext_resource type="Script" uid="uid://mblm23tbcj6s" path="res://addons/monke-net/src/ServerSide/ServerManager.cs" id="1_sjtyc"]
 [ext_resource type="Script" uid="uid://y4oqtpls34mr" path="res://addons/monke-net/src/ServerSide/InternalComponents/ServerNetworkClock.cs" id="2_jgjwk"]
 [ext_resource type="Script" uid="uid://b6notwourqxgf" path="res://addons/monke-net/src/ServerSide/InternalComponents/ServerEntityManager.cs" id="3_e5hxh"]
 [ext_resource type="Script" uid="uid://c3qoup1ef6qx2" path="res://addons/monke-net/src/ServerSide/InternalComponents/ServerInputReceiver.cs" id="4_ktnf1"]
 
-[node name="ServerManager" type="Node"]
+[node name="ServerManager" type="Node" unique_id=812389524]
 script = ExtResource("1_sjtyc")
 
-[node name="ServerEntityManager" type="Node" parent="."]
+[node name="ServerEntityManager" type="Node" parent="." unique_id=521701066]
 script = ExtResource("3_e5hxh")
-metadata/_custom_type_script = ExtResource("3_e5hxh")
+metadata/_custom_type_script = "uid://b6notwourqxgf"
 
-[node name="ServerInputReceiver" type="Node" parent="."]
+[node name="ServerInputReceiver" type="Node" parent="." unique_id=1254818624]
 script = ExtResource("4_ktnf1")
-metadata/_custom_type_script = ExtResource("4_ktnf1")
+metadata/_custom_type_script = "uid://c3qoup1ef6qx2"
 
-[node name="ServerNetworkClock" type="Node" parent="."]
+[node name="ServerNetworkClock" type="Node" parent="." unique_id=979221466]
 script = ExtResource("2_jgjwk")
-metadata/_custom_type_script = ExtResource("2_jgjwk")
+metadata/_custom_type_script = "uid://y4oqtpls34mr"
 
-[node name="Timer" type="Timer" parent="ServerNetworkClock"]
+[node name="Timer" type="Timer" parent="ServerNetworkClock" unique_id=1773190966]
 wait_time = 5.0
 autostart = true
 

@@ -55,6 +55,8 @@ public partial class MonkeNetManager : Node
             MonkeNetConfig.Instance.AddChild(MonkeNetConfig.Instance.CustomServerScene.Instantiate());
         }
 
+        IsServer = true;
+
         // TODO: pass configurations as struct/.ini
         serverManager.Initialize(_networkManager, port);
     }
@@ -64,9 +66,4 @@ public partial class MonkeNetManager : Node
         CreateServer(port);
         CreateClient("localhost", port);
     }
-
-    public bool IsServer()
-	{
-        return Multiplayer.GetUniqueId() == 1;
-	}
 }
