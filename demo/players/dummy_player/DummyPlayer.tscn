@@ -3,6 +3,8 @@
 [ext_resource type="PackedScene" uid="uid://bsg5g6qsvepfc" path="res://resources/Knight.glb" id="1_7a525"]
 [ext_resource type="Script" uid="uid://ckk4e44ekuhpf" path="res://demo/players/dummy_player/DummyStateInterpolation.cs" id="3_ewmdr"]
 
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_dummy"]
+
 [sub_resource type="AnimationNodeAnimation" id="AnimationNodeAnimation_kv5mh"]
 animation = &"Idle"
 
@@ -46,12 +48,21 @@ transitions = ["Idle", "Running_A", SubResource("AnimationNodeStateMachineTransi
 
 [node name="DummyPlayer" unique_id=1072408299 instance=ExtResource("1_7a525")]
 
-[node name="ClientInterpolatedEntity" type="Node" parent="." index="0" unique_id=511178044 node_paths=PackedStringArray("_parent", "_skeleton", "_animTree")]
+[node name="ClientInterpolatedEntity" type="Node" parent="." index="0" unique_id=511178044 node_paths=PackedStringArray("_parent", "_skeleton", "_animTree", "_collisionBody")]
 script = ExtResource("3_ewmdr")
 _parent = NodePath("..")
 _skeleton = NodePath("../Rig/Skeleton3D")
 _animTree = NodePath("../AnimationTree")
+_collisionBody = NodePath("../CollisionBody")
 metadata/_custom_type_script = "uid://dimg286suceeh"
+
+[node name="CollisionBody" type="CharacterBody3D" parent="." index="1" unique_id=601178044]
+collision_layer = 2
+collision_mask = 3
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="CollisionBody" index="0" unique_id=701178044]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+shape = SubResource("CapsuleShape3D_dummy")
 
 [node name="Skeleton3D" parent="Rig" parent_id_path=PackedInt32Array(1700703678) index="0" unique_id=1021593675]
 bones/1/position = Vector3(0, 0.38898382, 0)

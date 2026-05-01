@@ -35,7 +35,7 @@ public partial class ClientPredictionManager : InternalClientComponent
 
     public void Predict(int tick, IPackableElement input)
     {
-        MonkeNetManager.Instance.EntitySpawner.Entities.ForEach(entity =>
+        EntitySpawner.Instance.ClientEntities.ForEach(entity =>
         {
             var clientPredictedEntity = entity.GetComponent<ClientPredictedEntity>();
             clientPredictedEntity?.OnProcessTick(tick, input);
@@ -55,7 +55,7 @@ public partial class ClientPredictionManager : InternalClientComponent
 
         //TODO: use array of ClientPredictedEntity that updates each time a new entity is spawned/despawned
         //TODO: store entity state inside entity itself instead of having everything here on PredictionManager
-        MonkeNetManager.Instance.EntitySpawner.Entities.ForEach(entity =>
+        EntitySpawner.Instance.ClientEntities.ForEach(entity =>
         {
             var clientPredictedEntity = entity.GetComponent<ClientPredictedEntity>();
             if (clientPredictedEntity != null)

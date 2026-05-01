@@ -2,7 +2,28 @@
   "permissions": {
     "allow": [
       "Bash(xargs ls *)",
-      "Bash(xargs grep *)"
+      "Bash(xargs grep *)",
+      "Bash(powershell -Command 'Add-Type -AssemblyName System.Reflection; $a = [System.Reflection.Assembly]::LoadFile\\('\\\\''c:/Users/ivanz/Godot/godot-monke-net/.godot/mono/temp/bin/Debug/GodotSharp.dll'\\\\''\\); $a.GetTypes\\(\\) | Where-Object { $_.Name -eq '\\\\''PhysicsServer3D'\\\\'' } | ForEach-Object { $_.GetMethods\\(\\) | Where-Object { $_.Name -like '\\\\''*Space*'\\\\'' } | Select-Object Name }')",
+      "Bash(powershell -Command ' *)",
+      "Bash(grep -n \"void PhysicsServer3D::_bind_methods\\\\|^void.*_bind_methods\\\\|^{$\" C:/Users/ivanz/Godot/godot-mp-modified/servers/physics_3d/physics_server_3d.cpp)",
+      "Bash(git -C \"C:/Users/ivanz/Godot/godot-mp-modified\" log --oneline \"modules/mono/glue/GodotSharp/GodotSharp/Generated/GodotObjects/PhysicsServer3D.cs\")",
+      "Bash(git -C \"C:/Users/ivanz/Godot/godot-mp-modified\" log --oneline -- \"modules/mono/glue/GodotSharp/GodotSharp/Generated/GodotObjects/PhysicsServer3D.cs\")",
+      "Bash(git -C \"C:/Users/ivanz/Godot/godot-mp-modified\" log --oneline -5)",
+      "Bash(git -C \"C:/Users/ivanz/Godot/godot-mp-modified\" status --short -- \"modules/mono/glue/\")",
+      "Bash(git -C \"C:/Users/ivanz/Godot/godot-mp-modified\" ls-files \"modules/mono/glue/GodotSharp/GodotSharp/Generated/\")",
+      "Bash(git -C \"C:/Users/ivanz/Godot/godot-mp-modified\" ls-files \"modules/mono/glue/\")",
+      "Bash(cd /tmp)",
+      "Bash(cp \"C:/Users/ivanz/MyLocalNugetSource/GodotSharp.4.7.0-dev.nupkg\" .)",
+      "Bash(unzip -p GodotSharp.4.7.0-dev.nupkg \"lib/net8.0/GodotSharp.dll\")",
+      "Bash(cp \"C:/Users/ivanz/MyLocalNugetSource/GodotSharp.4.7.0-dev.nupkg\" GodotSharp_check.nupkg)",
+      "Bash(unzip -p GodotSharp_check.nupkg \"lib/net8.0/GodotSharp.dll\")",
+      "Bash(rm -f GodotSharp_check.nupkg GodotSharp_check.dll)",
+      "Bash(dotnet nuget *)",
+      "Bash(dotnet restore *)",
+      "Bash(dotnet build *)",
+      "Bash(\"C:/Users/ivanz/Godot/godot-mp-modified/bin/godot.windows.editor.dev.x86_64.mono.exe\" --headless --generate-mono-glue \"C:/Users/ivanz/Godot/godot-mp-modified/modules/mono/glue/\")",
+      "Bash(\"C:/Users/ivanz/Godot/godot-mp-modified/bin/godot.windows.editor.dev.x86_64.mono.exe\" --headless --editor --generate-mono-glue \"C:/Users/ivanz/Godot/godot-mp-modified/modules/mono/glue/\")",
+      "Bash(python.exe \"C:/Users/ivanz/Godot/godot-mp-modified/modules/mono/build_scripts/build_assemblies.py\" --godot-output-dir=\"C:/Users/ivanz/Godot/godot-mp-modified/bin\" --push-nupkgs-local \"C:/Users/ivanz/MyLocalNugetSource\")"
     ]
   }
 }

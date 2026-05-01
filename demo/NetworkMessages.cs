@@ -37,21 +37,29 @@ public struct EntityStateMessage : IEntityStateData
     public readonly IPackableElement GetCopy() => this;
 }
 
-// Character inputs sent to the server by a local player every time a key is pressed
+// Character inputs sent to the server by a local player every tick.
+// MoveX/MoveY carry analog values (-1..1) so controller sticks work correctly.
+// Keyboard produces exactly -1/0/1; a controller stick produces values in between.
 public struct CharacterInputMessage : IPackableElement
 {
-    public byte Keys { get; set; } // Single byte were each bit is a different pressed key
-    public float CameraYaw { get; set; } // Yaw (were are we looking at)
+    public byte Keys { get; set; }   // Bit flags for binary actions (see InputFlags).
+    public float MoveX { get; set; } // -1..1: negative = left, positive = right.
+    public float MoveY { get; set; } // -1..1: negative = forward, positive = backward.
+    public float CameraYaw { get; set; }
 
     public readonly void WriteBytes(MessageWriter writer)
     {
         writer.Write(Keys);
+        writer.Write(MoveX);
+        writer.Write(MoveY);
         writer.Write(CameraYaw);
     }
 
     public void ReadBytes(MessageReader reader)
     {
         Keys = reader.ReadByte();
+        MoveX = reader.ReadSingle();
+        MoveY = reader.ReadSingle();
         CameraYaw = reader.ReadSingle();
     }
 

@@ -30,6 +30,7 @@ public partial class ClientManager : Node
     private ClientPredictionManager _predictionManager;
 
     private bool _networkReady = false;
+    public bool IsNetworkReady => _networkReady;
 
     public override void _EnterTree()
     {
@@ -67,8 +68,13 @@ public partial class ClientManager : Node
         _predictionManager.Predict(currentTick, input);
         ClientTick?.Invoke(currentTick, input);
 
-        PhysicsServer3D.SpaceStep(MonkeNetManager.Instance.PhysicsSpace, PhysicsUtils.DeltaTime);
-        PhysicsServer3D.SpaceFlushQueries(MonkeNetManager.Instance.PhysicsSpace);
+        // In listen-server mode the ServerManager already stepped physics this frame;
+        // stepping it again here would advance it twice and cause double-speed movement.
+        if (!MonkeNetManager.Instance.IsServer)
+        {
+            PhysicsServer3D.SpaceStep(MonkeNetManager.Instance.PhysicsSpace, PhysicsUtils.DeltaTime);
+            PhysicsServer3D.SpaceFlushQueries(MonkeNetManager.Instance.PhysicsSpace);
+        }
 
         // Register all local predictions
         _predictionManager.RegisterPrediction(currentTick, input);
@@ -114,7 +120,7 @@ public partial class ClientManager : Node
         GD.Print($"At tick {currentTick}, latency calculations done. Avg. Latency {latencyAverageTicks} ticks, Jitter {jitterAverageTicks}, Offset {averageClockOffset}");
         EmitSignal(SignalName.LatencyCalculated, latencyAverageTicks, jitterAverageTicks);
         EmitSignal(SignalName.NetworkReady); //TODO: calculate this in other way, this should only be emmited once and
-                                             //right now it will be emitted every time the colck calculates latency
+                                             //right now it will be emitted every time the clock calculates latency
         _networkReady = true;
     }
 

@@ -11,6 +11,7 @@ public partial class MonkeNetManager : Node
     public Rid PhysicsSpace { get; private set; }
 
     private INetworkManager _networkManager;
+    private NetworkManagerEnet _clientNetworkManager;
 
     public override void _EnterTree()
     {
@@ -26,6 +27,7 @@ public partial class MonkeNetManager : Node
             throw new MonkeNetException("Missing MonkeNet configuration node! Please add the MonkeNetConfig node to your main scene.");
 
         _networkManager = GetNode<INetworkManager>("NetworkManagerEnet");
+        _clientNetworkManager = GetNode<NetworkManagerEnet>("NetworkManagerEnetClient");
         EntitySpawner = GetNode<EntitySpawner>("EntitySpawner");
     }
 
@@ -63,7 +65,25 @@ public partial class MonkeNetManager : Node
 
     public void CreateListenServer(int port)
     {
+        // Server uses the primary network manager.
         CreateServer(port);
-        CreateClient("localhost", port);
+
+        // The client needs its own SceneMultiplayer so that calling CreateClient()
+        // does not overwrite the server's ENet peer on the shared SceneMultiplayer,
+        // which would put the server into CONNECTING state and break snapshot sends.
+        // SetMultiplayer registers the custom api with the scene tree so Godot
+        // polls the underlying ENet peer — without this the handshake never completes.
+        var clientMultiplayer = new SceneMultiplayer();
+        GetTree().SetMultiplayer(clientMultiplayer, _clientNetworkManager.GetPath());
+        _clientNetworkManager.UseCustomMultiplayer(clientMultiplayer);
+
+        var clientManagerScene = GD.Load<PackedScene>("res://addons/monke-net/scenes/ClientManager.tscn");
+        var clientManager = clientManagerScene.Instantiate() as Client.ClientManager;
+        AddChild(clientManager);
+
+        if (MonkeNetConfig.Instance.CustomClientScene != null)
+            MonkeNetConfig.Instance.AddChild(MonkeNetConfig.Instance.CustomClientScene.Instantiate());
+
+        clientManager.Initialize(_clientNetworkManager, "localhost", port);
     }
 }

@@ -1,4 +1,5 @@
 ﻿using Godot;
+using MonkeNet.Client;
 
 namespace GameDemo;
 
@@ -11,8 +12,17 @@ public partial class FirstPersonCameraController : Node3D
 
     public override void _Ready()
     {
-        Input.MouseMode = Input.MouseModeEnum.Captured;
         _rotationHelperY = GetParent<Node3D>();
+        if (ClientManager.Instance?.IsNetworkReady == true)
+            Input.MouseMode = Input.MouseModeEnum.Captured;
+        else if (ClientManager.Instance != null)
+            ClientManager.Instance.NetworkReady += OnNetworkReady;
+    }
+
+    private void OnNetworkReady()
+    {
+        Input.MouseMode = Input.MouseModeEnum.Captured;
+        ClientManager.Instance.NetworkReady -= OnNetworkReady;
     }
 
     public override void _Input(InputEvent @event)
@@ -29,7 +39,7 @@ public partial class FirstPersonCameraController : Node3D
 
         if (@event is InputEventKey keyEvent)
         {
-            if (keyEvent.Keycode == Key.C && keyEvent.Pressed)
+            if (keyEvent.Keycode == Key.C && keyEvent.Pressed && ClientManager.Instance?.IsNetworkReady == true)
             {
                 Input.MouseMode = Input.MouseMode == Input.MouseModeEnum.Visible ?
                     Input.MouseModeEnum.Captured : Input.MouseModeEnum.Visible;

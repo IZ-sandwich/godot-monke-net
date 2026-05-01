@@ -10,10 +10,16 @@ public partial class EntitySpawner : Node
 {
     public const int AuthorityServer = 0;
 
+    // Collision layers — must match the names set in Project Settings → Layer Names → 3D Physics.
+    private const uint LayerEnvironment  = 1;        // layer  1 — static world geometry
+    private const uint LayerClientPlayers = 2;       // layer  2 — LocalPlayer, DummyPlayer
+    private const uint LayerServerPlayers = 1 << 15; // layer 16 — server entities in listen-server mode
+
     [Signal] public delegate void EntitySpawnedEventHandler(Node3D entity);
 
     public static EntitySpawner Instance { get; private set; }
-    public List<NetworkBehaviour> Entities { get; private set; } = []; //TODO: make dictionary for easier access
+    public List<NetworkBehaviour> Entities { get; private set; } = [];       // Server entities only
+    public List<NetworkBehaviour> ClientEntities { get; private set; } = []; // Client entities only (LocalPlayer, DummyPlayer)
 
     public override void _Ready()
     {
@@ -23,24 +29,25 @@ public partial class EntitySpawner : Node
     //TODO: do not cast, make Entities a list of INetworkedEntity directly
     public NetworkBehaviour GetEntityById(int entityId)
     {
-        for (int i = 0; i < Entities.Count; i++)
-        {
-            if (Entities[i] is NetworkBehaviour networkedEntity && networkedEntity.EntityId == entityId)
-            {
-                return networkedEntity;
-            }
-        }
+        // Prefer client entities so that in listen-server mode the LocalPlayer/DummyPlayer
+        // is returned instead of the ServerPlayer sharing the same EntityId.
+        foreach (var e in ClientEntities)
+            if (e.EntityId == entityId) return e;
+        foreach (var e in Entities)
+            if (e.EntityId == entityId) return e;
 
         throw new MonkeNetException($"Couldn't find entity by id {entityId}");
     }
 
-    // Can be called from both the server or a client, so it needs to handle both scenarios
-    public Node SpawnEntity(EntityEventMessage @event)
+    // Can be called from both the server or a client, so it needs to handle both scenarios.
+    // Pass isServerSpawn: true when called from a server-side component so that the server
+    // scene is selected even in listen-server mode where IsServer is true for both contexts.
+    public Node SpawnEntity(EntityEventMessage @event, bool isServerSpawn = false)
     {
         var config = MonkeNetConfig.Instance
             .GetSpawnConfigurationForEntityType(@event.EntityType);
 
-        var scene = SolveWhatEntitySceneToSpawn(config, @event);
+        var scene = SolveWhatEntitySceneToSpawn(config, @event, isServerSpawn);
 
         var instance = scene?.Instantiate()
             ?? throw new MonkeNetException($"Couldn't instance entity {@event.EntityType}");
@@ -50,11 +57,38 @@ public partial class EntitySpawner : Node
 
         InitializeEntity(instance, networkBehaviour, @event);
         AddChild(instance);
-        Entities.Add(networkBehaviour);
+        if (isServerSpawn)
+            Entities.Add(networkBehaviour);
+        else
+            ClientEntities.Add(networkBehaviour);
+
+        // In listen-server mode both a server entity and a client entity exist in the
+        // same physics space. Without adjustment they share the default collision layer
+        // (1) and block each other, causing stuck movement and a visible server mesh.
+        // Server entities move to layer 16 (detected by nothing on the client side) so
+        // they can still collide with the environment but never block client entities.
+        // Client entities move to layer 2 so they detect environment (mask bit 1) and
+        // each other (mask bit 2) but not server entities (layer 16).
+        if (MonkeNetManager.Instance.IsServer && ClientManager.Instance != null)
+        {
+            if (isServerSpawn)
+            {
+                SetCollisionLayerRecursive(instance, layer: LayerServerPlayers, mask: LayerEnvironment | LayerServerPlayers);
+                HideMeshesRecursive(instance);
+            }
+            else
+            {
+                SetCollisionLayerRecursive(instance, layer: LayerClientPlayers, mask: LayerEnvironment | LayerClientPlayers);
+            }
+        }
+
         EmitSignal(SignalName.EntitySpawned, instance);
         networkBehaviour.OnEntitySpawned();
 
-        GD.Print($"Spawned entity:{@event.EntityId} ({@event.EntityType}) Auth:{@event.Authority}");
+        string layerInfo = instance is CollisionObject3D co
+            ? $" Layer={co.CollisionLayer} Mask={co.CollisionMask}"
+            : "";
+        GD.Print($"Spawned entity:{@event.EntityId} ({@event.EntityType}) Auth:{@event.Authority} ServerSpawn:{isServerSpawn}{layerInfo}");
         return instance;
     }
 
@@ -90,9 +124,9 @@ public partial class EntitySpawner : Node
         entity.Metadata = @event.Metadata;
     }
 
-    private PackedScene SolveWhatEntitySceneToSpawn(EntitySpawnConfiguration entitySpawnConfig, EntityEventMessage @event)
+    private PackedScene SolveWhatEntitySceneToSpawn(EntitySpawnConfiguration entitySpawnConfig, EntityEventMessage @event, bool isServerSpawn)
     {
-        if (MonkeNetManager.Instance.IsServer)
+        if (isServerSpawn)
             return entitySpawnConfig.ServerScene;
 
         bool isAuthority = @event.Authority == ClientManager.Instance.GetNetworkId();
@@ -101,5 +135,24 @@ public partial class EntitySpawner : Node
             return entitySpawnConfig.ClientAuthorityScene;
 
         return entitySpawnConfig.ClientDummyScene;
+    }
+
+    private static void SetCollisionLayerRecursive(Node node, uint layer, uint mask)
+    {
+        if (node is CollisionObject3D body)
+        {
+            body.CollisionLayer = layer;
+            body.CollisionMask = mask;
+        }
+        foreach (Node child in node.GetChildren())
+            SetCollisionLayerRecursive(child, layer, mask);
+    }
+
+    private static void HideMeshesRecursive(Node node)
+    {
+        if (node is MeshInstance3D mesh)
+            mesh.Visible = false;
+        foreach (Node child in node.GetChildren())
+            HideMeshesRecursive(child);
     }
 }

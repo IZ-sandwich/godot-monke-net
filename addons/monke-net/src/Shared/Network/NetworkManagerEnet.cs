@@ -22,8 +22,25 @@ public partial class NetworkManagerEnet : Node, INetworkManager
 
     public override void _Ready()
     {
-        _multiplayer = Multiplayer as SceneMultiplayer;
+        SubscribeToMultiplayer(Multiplayer as SceneMultiplayer);
+    }
 
+    // Used by CreateListenServer to give this node its own SceneMultiplayer so it
+    // does not share a peer with the server-side NetworkManagerEnet.
+    public void UseCustomMultiplayer(SceneMultiplayer multiplayer)
+    {
+        SubscribeToMultiplayer(multiplayer);
+    }
+
+    private void SubscribeToMultiplayer(SceneMultiplayer multiplayer)
+    {
+        if (_multiplayer != null)
+        {
+            _multiplayer.PeerConnected -= OnPeerConnected;
+            _multiplayer.PeerDisconnected -= OnPeerDisconnected;
+            _multiplayer.PeerPacket -= OnPacketReceived;
+        }
+        _multiplayer = multiplayer;
         _multiplayer.PeerConnected += OnPeerConnected;
         _multiplayer.PeerDisconnected += OnPeerDisconnected;
         _multiplayer.PeerPacket += OnPacketReceived;
@@ -49,6 +66,8 @@ public partial class NetworkManagerEnet : Node, INetworkManager
 
     public void SendBytes(byte[] bin, int id, int channel, INetworkManager.PacketModeEnum mode)
     {
+        if (_multiplayer.MultiplayerPeer?.GetConnectionStatus() != MultiplayerPeer.ConnectionStatus.Connected)
+            return;
         MultiplayerPeer.TransferModeEnum m = mode == INetworkManager.PacketModeEnum.Reliable ? MultiplayerPeer.TransferModeEnum.Reliable : MultiplayerPeer.TransferModeEnum.Unreliable;
         _multiplayer.SendBytes(bin, id, m, channel);
     }

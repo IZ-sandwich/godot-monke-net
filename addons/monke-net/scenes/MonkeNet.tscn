@@ -10,5 +10,8 @@ script = ExtResource("1_f83ke")
 [node name="NetworkManagerEnet" type="Node" parent="." unique_id=1114520146]
 script = ExtResource("2_7pmc0")
 
+[node name="NetworkManagerEnetClient" type="Node" parent="." unique_id=1114520200]
+script = ExtResource("2_7pmc0")
+
 [node name="EntitySpawner" type="Node" parent="." unique_id=2015813499]
 script = ExtResource("3_l3m48")

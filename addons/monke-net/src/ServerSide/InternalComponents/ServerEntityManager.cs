@@ -106,7 +106,7 @@ public partial class ServerEntityManager : InternalServerComponent
 
         // TODO: this should be inside metadata
         // Execute event locally and retrieve position and rotation data
-        T instancedEntity = _entitySpawner.SpawnEntity(entityEvent) as T;
+        T instancedEntity = _entitySpawner.SpawnEntity(entityEvent, isServerSpawn: true) as T;
         entityEvent.Position = instancedEntity.Position;
         entityEvent.Yaw = instancedEntity.Rotation.Y;
 

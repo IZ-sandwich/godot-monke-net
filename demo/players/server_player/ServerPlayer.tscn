@@ -8,6 +8,8 @@
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_ry084"]
 
 [node name="ServerPlayer" type="CharacterBody3D" unique_id=1230422301]
+collision_layer = 32768
+collision_mask = 32769
 
 [node name="ServerStateSyncronizer" type="Node" parent="." unique_id=954172036 node_paths=PackedStringArray("_characterBody", "_playerMovement")]
 script = ExtResource("2_c683x")

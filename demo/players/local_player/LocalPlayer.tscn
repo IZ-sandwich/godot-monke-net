@@ -9,6 +9,8 @@
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_x3j47"]
 
 [node name="LocalPlayer" type="CharacterBody3D" unique_id=1000739421]
+collision_layer = 2
+collision_mask = 3
 script = ExtResource("1_vcufi")
 
 [node name="ClientPredictedEntity" type="Node" parent="." unique_id=1274239566 node_paths=PackedStringArray("_playerMovement", "_characterBody")]
