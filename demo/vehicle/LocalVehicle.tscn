@@ -1,0 +1,65 @@
+[gd_scene format=3 uid="uid://cu3w7mhyotfhv"]
+
+[ext_resource type="Script" uid="uid://b27jyv614frfs" path="res://demo/vehicle/LocalVehiclePrediction.cs" id="2_lvp"]
+[ext_resource type="Script" uid="uid://o8fwa7kmma11" path="res://addons/monke-net/src/Shared/PredictionRigidbody3D.cs" id="3_predrb"]
+[ext_resource type="Script" uid="uid://rp5ifdkt35gg" path="res://addons/monke-net/src/Shared/PredictionVisualSmoothing3D.cs" id="4_smooth"]
+[ext_resource type="Script" uid="uid://b3j2qn6ralblc" path="res://demo/vehicle/VehicleInteractionPrompt.cs" id="5_vip"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_veh"]
+size = Vector3(2, 1, 4)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_veh"]
+size = Vector3(2, 1, 4)
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_interact"]
+radius = 3.0
+
+[node name="LocalVehicle" type="RigidBody3D" unique_id=1602080610]
+collision_layer = 2
+collision_mask = 3
+
+[node name="VisualRoot" type="Node3D" parent="." unique_id=1602080612]
+top_level = true
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="VisualRoot" unique_id=683380210]
+mesh = SubResource("BoxMesh_veh")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=2065844210]
+shape = SubResource("BoxShape3D_veh")
+
+[node name="PredictionVisualSmoothing" type="Node3D" parent="." unique_id=1602080613 node_paths=PackedStringArray("Body", "Visual")]
+script = ExtResource("4_smooth")
+Body = NodePath("..")
+Visual = NodePath("../VisualRoot")
+metadata/_custom_type_script = "uid://rp5ifdkt35gg"
+
+[node name="PredictionRigidbody" type="Node" parent="." unique_id=1602080611 node_paths=PackedStringArray("_body", "_smoothing")]
+script = ExtResource("3_predrb")
+_body = NodePath("..")
+_smoothing = NodePath("../PredictionVisualSmoothing")
+metadata/_custom_type_script = "uid://o8fwa7kmma11"
+
+[node name="ClientPredictedEntity" type="Node" parent="." unique_id=1958913700 node_paths=PackedStringArray("_predictionRb")]
+script = ExtResource("2_lvp")
+_predictionRb = NodePath("../PredictionRigidbody")
+metadata/_custom_type_script = "uid://2rptuj0wp7kx"
+
+[node name="InteractionArea" type="Area3D" parent="." unique_id=1602080614]
+collision_layer = 0
+collision_mask = 2
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="InteractionArea" unique_id=1602080615]
+shape = SubResource("SphereShape3D_interact")
+
+[node name="InteractionLabel" type="Label3D" parent="." unique_id=1602080616]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 0)
+visible = false
+billboard = 1
+no_depth_test = true
+text = "[F] Drive Vehicle"
+
+[node name="InteractionPrompt" type="Node" parent="." unique_id=1602080617 node_paths=PackedStringArray("Area", "Label", "Vehicle")]
+script = ExtResource("5_vip")
+Area = NodePath("../InteractionArea")
+Label = NodePath("../InteractionLabel")
+Vehicle = NodePath("../ClientPredictedEntity")

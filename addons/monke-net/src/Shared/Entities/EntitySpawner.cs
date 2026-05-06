@@ -17,6 +17,7 @@ public partial class EntitySpawner : Node
     private const uint LayerServerPlayers = 1 << 15; // layer 16 — server entities in listen-server mode
 
     [Signal] public delegate void EntitySpawnedEventHandler(Node3D entity);
+    [Signal] public delegate void EntityDestroyedEventHandler(int entityId);
 
     public static EntitySpawner Instance { get; private set; }
     public List<NetworkBehaviour> Entities { get; private set; } = [];       // Server entities only
@@ -116,6 +117,7 @@ public partial class EntitySpawner : Node
         {
             Entities.Remove(serverEntity);
             FreeEntityRoot(serverEntity);
+            EmitSignal(SignalName.EntityDestroyed, @event.EntityId);
             MonkeLogger.Info($"Destroyed server entity {serverEntity.EntityId}");
             return;
         }
@@ -125,6 +127,7 @@ public partial class EntitySpawner : Node
         {
             ClientEntities.Remove(clientEntity);
             FreeEntityRoot(clientEntity);
+            EmitSignal(SignalName.EntityDestroyed, @event.EntityId);
             MonkeLogger.Info($"Destroyed client entity {clientEntity.EntityId}");
             return;
         }
@@ -139,6 +142,7 @@ public partial class EntitySpawner : Node
         {
             ClientEntities.Remove(clientEntity);
             FreeEntityRoot(clientEntity);
+            EmitSignal(SignalName.EntityDestroyed, @event.EntityId);
             MonkeLogger.Info($"Destroyed client entity {clientEntity.EntityId}");
             return;
         }
@@ -198,6 +202,19 @@ public partial class EntitySpawner : Node
         entity.EntityType = @event.EntityType;
         entity.Authority = @event.Authority;
         entity.Metadata = @event.Metadata;
+
+        // Apply the spawn pose carried in the EntityEventMessage. For initial spawns this is
+        // Vector3.Zero / 0f (the default), so nothing visible changes. For reclaim spawns the
+        // server fills these from the orphaned entity's last known transform — without this
+        // the reclaimed body would respawn at scene-origin instead of where it was when the
+        // owner disconnected.
+        if (node is Node3D node3D)
+        {
+            node3D.Position = @event.Position;
+            var rotation = node3D.Rotation;
+            rotation.Y = @event.Yaw;
+            node3D.Rotation = rotation;
+        }
     }
 
     private PackedScene SolveWhatEntitySceneToSpawn(EntitySpawnConfiguration entitySpawnConfig, EntityEventMessage @event, bool isServerSpawn)

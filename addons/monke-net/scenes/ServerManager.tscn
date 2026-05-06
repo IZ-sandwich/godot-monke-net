@@ -5,6 +5,7 @@
 [ext_resource type="Script" uid="uid://b6notwourqxgf" path="res://addons/monke-net/src/ServerSide/InternalComponents/ServerEntityManager.cs" id="3_e5hxh"]
 [ext_resource type="Script" uid="uid://c3qoup1ef6qx2" path="res://addons/monke-net/src/ServerSide/InternalComponents/ServerInputReceiver.cs" id="4_ktnf1"]
 [ext_resource type="Script" uid="uid://djg6dw7b3qlvv" path="res://addons/monke-net/src/ServerSide/InternalComponents/ServerConnectionMonitor.cs" id="5_connmon"]
+[ext_resource type="Script" uid="uid://c23wexnu631gn" path="res://addons/monke-net/src/ServerSide/InternalComponents/LagCompensation.cs" id="6_kvp73"]
 
 [node name="ServerManager" type="Node" unique_id=812389524]
 script = ExtResource("1_sjtyc")
@@ -27,5 +28,8 @@ autostart = true
 
 [node name="ServerConnectionMonitor" type="Node" parent="." unique_id=1063482751]
 script = ExtResource("5_connmon")
+
+[node name="LagCompensation" type="Node" parent="." unique_id=137703637]
+script = ExtResource("6_kvp73")
 
 [connection signal="timeout" from="ServerNetworkClock/Timer" to="ServerNetworkClock" method="OnTimerTimeout"]

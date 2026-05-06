@@ -307,6 +307,24 @@ public class SerializationTests
         }
     }
 
+    // A-16 ─────────────────────────────────────────────────────────────────────
+    [TestCase]
+    public void RoundTrip_OwnershipChangeRequestMessage()
+    {
+        var msg = new OwnershipChangeRequestMessage { EntityId = 42 };
+        var result = (OwnershipChangeRequestMessage)RoundTrip(msg);
+        AssertThat(result.EntityId).IsEqual(42);
+    }
+
+    // A-17 ─────────────────────────────────────────────────────────────────────
+    [TestCase]
+    public void RoundTrip_OwnershipChangeRejectedMessage()
+    {
+        var msg = new OwnershipChangeRejectedMessage { EntityId = 99 };
+        var result = (OwnershipChangeRejectedMessage)RoundTrip(msg);
+        AssertThat(result.EntityId).IsEqual(99);
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     private static IPackableMessage RoundTrip(IPackableMessage msg)

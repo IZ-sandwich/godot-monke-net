@@ -38,6 +38,7 @@ public class EntityRetentionTests
     {
         MonkeNetConfig.Instance = null;
         FakeNetworkBridge.Reset();
+        MonkeNet.Client.ClientEntityManager.ClearSavedReclaimToken();
         MessageSerializer.RegisterNetworkMessages();
         (_serverNet, _clientNet) = FakeNetworkBridge.CreatePair();
 
@@ -250,6 +251,148 @@ public class EntityRetentionTests
         _serverNet.SimulateIncomingPacket(anotherPeerId, MessageSerializer.Serialize(new ReclaimEntityMessage { Token = token }));
         await _serverRunner.AwaitIdleFrame();
         AssertThat(EntitySpawner.Instance.Entities.First(e => e.EntityId == entityId).Authority).IsEqual(newPeerId);
+    }
+
+    // R-08 ─────────────────────────────────────────────────────────────────────
+    [TestCase]
+    public async Task Reclaim_ExpiresAfterConfiguredDuration()
+    {
+        _monitor.ManualDisconnectMode = DisconnectEntityMode.KeepEntity;
+        _monitor.ReclaimExpirySec = 30f;
+        var fakeClock = new FakeTimestampProvider();
+        _monitor.TimestampProvider = fakeClock;
+
+        SpawnEntityForClient(ClientPeerId);
+        await _serverRunner.AwaitIdleFrame();
+        int entityId = EntitySpawner.Instance.Entities[0].EntityId;
+
+        SendDisconnectNotification(ClientPeerId);
+        _serverNet.FireClientDisconnected(ClientPeerId);
+        await _serverRunner.AwaitIdleFrame();
+
+        string token = GetSavedReclaimToken();
+        AssertThat(token).IsNotNull();
+
+        // Just before expiry — token still valid (sweep does nothing).
+        fakeClock.AdvanceBy(29_000);
+        _server!.EmitSignal(ServerManager.SignalName.ServerNetworkTick, 1);
+        await _serverRunner.AwaitIdleFrame();
+
+        bool entityStillExists = EntitySpawner.Instance.Entities.Any(e => e.EntityId == entityId);
+        AssertThat(entityStillExists)
+            .OverrideFailureMessage("Entity destroyed before expiry").IsTrue();
+
+        // Past expiry — sweep should drop the token and destroy the orphaned entity.
+        fakeClock.AdvanceBy(2_000); // total 31s, past the 30s threshold
+        _server.EmitSignal(ServerManager.SignalName.ServerNetworkTick, 2);
+        await _serverRunner.AwaitIdleFrame();
+
+        AssertThat(_monitor.ConsumeReclaimToken(token))
+            .OverrideFailureMessage("Token should be expired and removed").IsNull();
+        bool entityRemoved = !EntitySpawner.Instance.Entities.Any(e => e.EntityId == entityId);
+        AssertThat(entityRemoved)
+            .OverrideFailureMessage("Orphaned entity should have been destroyed by expiry sweep").IsTrue();
+    }
+
+    // R-09 ─────────────────────────────────────────────────────────────────────
+    // Verifies that a reconnecting client receives entities spawned during its outage
+    // via the standard OnClientConnected -> SyncWorldState path, not just its own
+    // reclaimed entities. This is a regression guard against any future change that
+    // would skip SyncWorldState when a reclaim is anticipated.
+    [TestCase]
+    public async Task Reclaim_PostReconnectResyncIncludesEntitiesSpawnedDuringOutage()
+    {
+        _monitor.ManualDisconnectMode = DisconnectEntityMode.KeepEntity;
+
+        // Client A's entity (will be orphaned)
+        SpawnEntityForClient(ClientPeerId);
+        await _serverRunner.AwaitIdleFrame();
+        int aEntityId = EntitySpawner.Instance.Entities[0].EntityId;
+
+        // Client A disconnects with KeepEntity → entity orphaned, token stored
+        SendDisconnectNotification(ClientPeerId);
+        _serverNet.FireClientDisconnected(ClientPeerId);
+        await _serverRunner.AwaitIdleFrame();
+
+        // While A is gone, the server spawns another entity (e.g. a ball, a global prop)
+        ServerManager.Instance.SpawnEntity<Godot.Node3D>(entityType: 0, authority: 0);
+        await _serverRunner.AwaitIdleFrame();
+        // The new entity is the most recently added one in the spawner's Entities list.
+        int newEntityId = EntitySpawner.Instance.Entities.Last().EntityId;
+        AssertThat(newEntityId).IsNotEqual(aEntityId);
+
+        // Client A reconnects under a new peer id
+        int newPeerId = 3;
+        int packetCountBefore = _serverNet.SentPackets.Count;
+        _serverNet.FireClientConnected(newPeerId);
+        await _serverRunner.AwaitIdleFrame();
+
+        // SyncWorldState must have sent Created events for BOTH entities to peer 3:
+        //   - the orphaned entity (will later transition via reclaim)
+        //   - the new entity that did not exist when A originally connected
+        bool sawNewEntityCreated = false;
+        bool sawOrphanedEntityCreated = false;
+        for (int i = packetCountBefore; i < _serverNet.SentPackets.Count; i++)
+        {
+            var (data, id, _, _) = _serverNet.SentPackets[i];
+            if (id != newPeerId) continue;
+            try
+            {
+                if (MessageSerializer.Deserialize(data) is EntityEventMessage ev
+                    && ev.Event == EntityEventEnum.Created)
+                {
+                    if (ev.EntityId == newEntityId) sawNewEntityCreated = true;
+                    if (ev.EntityId == aEntityId) sawOrphanedEntityCreated = true;
+                }
+            }
+            catch { }
+        }
+        AssertThat(sawNewEntityCreated)
+            .OverrideFailureMessage("Reconnecting client did not receive Created event for entity spawned during outage").IsTrue();
+        AssertThat(sawOrphanedEntityCreated)
+            .OverrideFailureMessage("Reconnecting client did not receive Created event for its orphaned entity").IsTrue();
+    }
+
+    // R-10 ─────────────────────────────────────────────────────────────────────
+    // The reclaim token is stored statically on ClientEntityManager so it survives
+    // MonkeNetManager.CreateClient disposing the previous ClientManager and OnConnectionLost
+    // reloading the scene. Without this persistence, the freshly-instantiated
+    // ClientEntityManager has no token to send on its next OnNetworkReady, and the
+    // server-side reclaim entry expires unused.
+    [TestCase]
+    public async Task ReclaimToken_PersistsAcrossClientManagerTeardown()
+    {
+        AssertThat(MonkeNet.Client.ClientEntityManager.HasSavedReclaimToken)
+            .OverrideFailureMessage("Static reclaim token leaked from a prior test").IsFalse();
+
+        // Deliver a SessionTokenMessage to the client (mimics ServerConnectionMonitor
+        // sending one on connect). ClientEntityManager.OnCommandReceived stores it as _sessionToken.
+        const string sessionToken = "test-reclaim-token-r10";
+        _clientNet.SimulateIncomingPacket(1, MessageSerializer.Serialize(
+            new SessionTokenMessage { Token = sessionToken }));
+        await _clientRunner.AwaitIdleFrame();
+
+        // Static is still empty — the move into the static happens on disconnect, not connect.
+        AssertThat(MonkeNet.Client.ClientEntityManager.HasSavedReclaimToken).IsFalse();
+
+        // Trigger the client-side disconnect path. ClientManager.OnPeerDisconnected emits
+        // ServerDisconnectedInternal → ClientEntityManager.OnServerDisconnected moves
+        // _sessionToken into the static _persistentReclaimToken.
+        _clientNet.SimulateServerDisconnected();
+        await _clientRunner.AwaitIdleFrame();
+
+        AssertThat(MonkeNet.Client.ClientEntityManager.HasSavedReclaimToken)
+            .OverrideFailureMessage("OnServerDisconnected did not save the session token").IsTrue();
+
+        // Tear down the ClientManager (and its child ClientEntityManager). This is what
+        // MonkeNetManager.CreateClient does when the user clicks Reconnect.
+        _clientRunner.Dispose();
+        _clientRunner = null;
+
+        // The token must still be accessible — a freshly-instantiated ClientEntityManager
+        // will read it on its next OnNetworkReady and emit a ReclaimEntityMessage.
+        AssertThat(MonkeNet.Client.ClientEntityManager.HasSavedReclaimToken)
+            .OverrideFailureMessage("Reclaim token was lost when ClientManager was disposed").IsTrue();
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────

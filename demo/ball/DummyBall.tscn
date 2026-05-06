@@ -1,14 +1,26 @@
 [gd_scene format=3 uid="uid://dp8a4isumyhew"]
 
-[ext_resource type="Script" path="res://demo/ball/DummyBallStateInterpolation.cs" id="2_dummy"]
+[ext_resource type="Script" uid="uid://bjdfscfaesv6h" path="res://demo/ball/DummyBallStateInterpolation.cs" id="2_dummy"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_blueball"]
+albedo_color = Color(0.18, 0.45, 0.95, 1)
 
 [sub_resource type="SphereMesh" id="SphereMesh_rf2cd"]
+material = SubResource("StandardMaterial3D_blueball")
 
 [sub_resource type="SphereShape3D" id="SphereShape3D_a814b"]
 
-[node name="DummyBall" type="StaticBody3D" unique_id=1602080398]
+[sub_resource type="PhysicsMaterial" id="PhysicsMaterial_ball"]
+friction = 0.6
+bounce = 0.3
+
+[node name="DummyBall" type="RigidBody3D" unique_id=1602080398]
 collision_layer = 2
 collision_mask = 3
+physics_material_override = SubResource("PhysicsMaterial_ball")
+linear_damp = 0.4
+angular_damp = 0.8
+physics_interpolation_mode = 2
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=683380155]
 mesh = SubResource("SphereMesh_rf2cd")
@@ -16,6 +28,7 @@ mesh = SubResource("SphereMesh_rf2cd")
 [node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=2065844184]
 shape = SubResource("SphereShape3D_a814b")
 
-[node name="ClientInterpolatedEntity" type="Node" parent="." unique_id=1958913608 node_paths=PackedStringArray("_parent")]
+[node name="ClientInterpolatedEntity" type="Node" parent="." unique_id=1958913608 node_paths=PackedStringArray("_body")]
 script = ExtResource("2_dummy")
-_parent = NodePath("..")
+_body = NodePath("..")
+metadata/_custom_type_script = "uid://dimg286suceeh"

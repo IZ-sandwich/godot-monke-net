@@ -155,6 +155,17 @@ public partial class ServerManager : Node
         _entityManager.DestroyEntity(entityId, targetId);
     }
 
+    /// <summary>
+    /// Reassigns ownership of an entity to a different peer (or back to the server with
+    /// <paramref name="newAuthority"/> = 0). Old and new owner clients receive a Destroy +
+    /// Create pair so their local view swaps between predicted and interpolated. Use this
+    /// for vehicle entry/exit, picking up items, etc.
+    /// </summary>
+    public void ChangeAuthority(int entityId, int newAuthority)
+    {
+        _entityManager.ChangeAuthority(entityId, newAuthority);
+    }
+
     public void DisconnectClient(int clientId, bool force = false)
     {
         _networkManager.DisconnectClient(clientId, force);

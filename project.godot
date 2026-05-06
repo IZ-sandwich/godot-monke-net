@@ -90,6 +90,7 @@ escape={
 
 3d_physics/layer_1="Environment"
 3d_physics/layer_2="ClientPlayers"
+3d_physics/layer_3="OfflineProps"
 3d_physics/layer_16="ServerPlayers"
 
 [physics]

@@ -15,10 +15,25 @@ public partial class ServerInputReceiver : InternalServerComponent
     // disconnected client doesn't keep moving forever.
     [Export] public float StaleInputTimeoutSec { get; set; } = 1.0f;
 
+    /// <summary>
+    /// Hard cap on how many ticks of unconsumed input may be queued per entity. Above
+    /// this, the oldest queued ticks are evicted. Protects the server from a client
+    /// (malicious or buggy) that floods far-future inputs and would otherwise grow the
+    /// pending dictionary without bound. Default ≈ 60 ticks (1s @ 60Hz) — well past any
+    /// reasonable client lookahead, but still bounded.
+    /// </summary>
+    [Export] public int MaximumServerReplicates { get; set; } = 60;
+
     private readonly Dictionary<int, Dictionary<NetworkBehaviour, IPackableElement>> _pendingInputs = [];
     private readonly Dictionary<NetworkBehaviour, IPackableElement> _lastInputStored = [];
     private readonly Dictionary<NetworkBehaviour, int> _lastReceivedTick = [];
     private readonly Dictionary<NetworkBehaviour, IPackableElement> _defaultInputCache = [];
+
+    // Side index of which ticks each entity currently has queued, for O(log n) eviction
+    // of the oldest tick when MaximumServerReplicates is exceeded.
+    private readonly Dictionary<NetworkBehaviour, SortedSet<int>> _pendingTicksPerEntity = [];
+
+    private int _trimmedInputTotal = 0;
 
     private int _missedInput = 0;
     private readonly Dictionary<int, int> _missedInputTotal = [];
@@ -111,20 +126,59 @@ public partial class ServerInputReceiver : InternalServerComponent
                 _pendingInputs.Add(tick, value);
             }
 
-            value.TryAdd(serverEntity, input);
+            if (value.TryAdd(serverEntity, input))
+            {
+                if (!_pendingTicksPerEntity.TryGetValue(serverEntity, out var ticks))
+                {
+                    ticks = new SortedSet<int>();
+                    _pendingTicksPerEntity[serverEntity] = ticks;
+                }
+                ticks.Add(tick);
+            }
+        }
+
+        EnforceCap(serverEntity);
+    }
+
+    private void EnforceCap(NetworkBehaviour serverEntity)
+    {
+        if (!_pendingTicksPerEntity.TryGetValue(serverEntity, out var ticks)) return;
+        while (ticks.Count > MaximumServerReplicates)
+        {
+            int oldest = ticks.Min;
+            ticks.Remove(oldest);
+            if (_pendingInputs.TryGetValue(oldest, out var perTick))
+            {
+                perTick.Remove(serverEntity);
+                if (perTick.Count == 0) _pendingInputs.Remove(oldest);
+            }
+            _trimmedInputTotal++;
         }
     }
 
     public void DropOutdatedInputs(int currentTick)
     {
+        // Materialise the keys list first — modifying _pendingInputs while enumerating
+        // its Keys collection throws InvalidOperationException.
+        var stale = new List<int>();
         foreach (int key in _pendingInputs.Keys)
         {
-            if (key <= currentTick)
-            {
-                _pendingInputs.Remove(key);
-            }
+            if (key <= currentTick) stale.Add(key);
+        }
+        foreach (int key in stale)
+        {
+            _pendingInputs.Remove(key);
+        }
+
+        // Trim the per-entity tick index too so EnforceCap doesn't think long-consumed
+        // ticks are still in flight.
+        foreach (var ticks in _pendingTicksPerEntity.Values)
+        {
+            while (ticks.Count > 0 && ticks.Min <= currentTick) ticks.Remove(ticks.Min);
         }
     }
+
+    public int GetTrimmedInputTotal() => _trimmedInputTotal;
 
     public void DisplayDebugInformation()
     {
@@ -132,6 +186,7 @@ public partial class ServerInputReceiver : InternalServerComponent
         {
             ImGui.Text($"Input Queue {_pendingInputs.Count}");
             ImGui.Text($"Missed Inputs {_missedInput}");
+            ImGui.Text($"Trimmed (over cap) {_trimmedInputTotal}");
         }
     }
 }

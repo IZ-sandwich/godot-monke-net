@@ -11,6 +11,10 @@
 [ext_resource type="PackedScene" uid="uid://cdm6b7x3omwnr" path="res://demo/ball/LocalBall.tscn" id="7_torvr"]
 [ext_resource type="PackedScene" uid="uid://dr73i1u4dj11g" path="res://demo/ball/ServerBall.tscn" id="9_yvb8b"]
 [ext_resource type="PackedScene" uid="uid://dp8a4isumyhew" path="res://demo/ball/DummyBall.tscn" id="10_dumby"]
+[ext_resource type="PackedScene" uid="uid://cu3w7mhyotfhv" path="res://demo/vehicle/LocalVehicle.tscn" id="11_lveh"]
+[ext_resource type="PackedScene" uid="uid://b6sqb51sprj38" path="res://demo/vehicle/ServerVehicle.tscn" id="12_sveh"]
+[ext_resource type="PackedScene" uid="uid://ccbcx6qy3sqf8" path="res://demo/vehicle/DummyVehicle.tscn" id="13_dveh"]
+[ext_resource type="Script" uid="uid://df8rhrcg15uax" path="res://addons/monke-net/src/Shared/OfflineRigidbody3D.cs" id="14_offrb"]
 
 [sub_resource type="Resource" id="Resource_yvb8b"]
 script = ExtResource("6_p5x2j")
@@ -27,6 +31,14 @@ ClientDummyScene = ExtResource("10_dumby")
 ServerScene = ExtResource("9_yvb8b")
 metadata/_custom_type_script = "uid://1rpyl54svogx"
 
+[sub_resource type="Resource" id="Resource_veh"]
+script = ExtResource("6_p5x2j")
+EntityType = 2
+ClientAuthorityScene = ExtResource("11_lveh")
+ClientDummyScene = ExtResource("13_dveh")
+ServerScene = ExtResource("12_sveh")
+metadata/_custom_type_script = "uid://1rpyl54svogx"
+
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_lcinv"]
 albedo_color = Color(0.101961, 0.101961, 0.101961, 1)
 
@@ -36,12 +48,24 @@ albedo_color = Color(0.581943, 0.6945688, 0.2467655, 1)
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_obp5r"]
 albedo_color = Color(0.344328, 1, 0.126361, 1)
 
+[sub_resource type="PhysicsMaterial" id="PhysicsMaterial_ball"]
+friction = 0.6
+bounce = 0.3
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_orangeball"]
+albedo_color = Color(1, 0.5, 0.1, 1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_orangeball"]
+material = SubResource("StandardMaterial3D_orangeball")
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_orangeball"]
+
 [node name="MainScene" type="Node3D" unique_id=27712328]
 script = ExtResource("1_a3xwa")
 
 [node name="MonkeNetConfig" type="Node" parent="." unique_id=1801734743]
 script = ExtResource("2_rf2cd")
-EntitySpawnConfiguration = Array[Object]([SubResource("Resource_yvb8b"), SubResource("Resource_3hf6u")])
+EntitySpawnConfiguration = Array[Object]([SubResource("Resource_yvb8b"), SubResource("Resource_3hf6u"), SubResource("Resource_veh")])
 metadata/_custom_type_script = "uid://dnkbivw2aixxo"
 
 [node name="Menu" type="Control" parent="." unique_id=796659374]
@@ -54,62 +78,119 @@ grow_vertical = 2
 
 [node name="SpawnButton" type="Button" parent="Menu" unique_id=81406506]
 layout_mode = 1
-anchors_preset = 5
-anchor_left = 0.5
-anchor_right = 0.5
-offset_left = -73.0
-offset_right = 73.0
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -160.0
 offset_bottom = 31.0
-grow_horizontal = 2
+grow_horizontal = 0
 text = "Spawn Player"
 
 [node name="SpawnBallButton" type="Button" parent="Menu" unique_id=1672447597]
 layout_mode = 1
-anchors_preset = 5
-anchor_left = 0.5
-anchor_right = 0.5
-offset_left = -73.0
-offset_top = 33.0
-offset_right = 73.0
-offset_bottom = 64.0
-grow_horizontal = 2
-text = "Spawn Ball
-"
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -160.0
+offset_top = 32.0
+offset_bottom = 63.0
+grow_horizontal = 0
+text = "Spawn Ball"
+
+[node name="SpawnVehicleButton" type="Button" parent="Menu" unique_id=1672447598]
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -160.0
+offset_top = 64.0
+offset_bottom = 95.0
+grow_horizontal = 0
+text = "Spawn Vehicle"
+
+[node name="ClaimVehicleButton" type="Button" parent="Menu" unique_id=1672447599]
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -160.0
+offset_top = 96.0
+offset_bottom = 127.0
+grow_horizontal = 0
+text = "Claim Vehicle"
 
 [node name="HostButton" type="Button" parent="Menu" unique_id=2000725900]
-layout_mode = 0
-offset_right = 152.0
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -320.0
+offset_right = -160.0
 offset_bottom = 31.0
+grow_horizontal = 0
 text = "Host Server"
 
 [node name="ConnectButton" type="Button" parent="Menu" unique_id=127255530]
-layout_mode = 0
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -320.0
 offset_top = 32.0
-offset_right = 152.0
+offset_right = -160.0
 offset_bottom = 63.0
+grow_horizontal = 0
 text = "Connect to Server"
 
 [node name="HostAndConnectButton" type="Button" parent="Menu" unique_id=1890646881]
-layout_mode = 0
-offset_top = 62.0
-offset_right = 152.0
-offset_bottom = 93.0
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -320.0
+offset_top = 64.0
+offset_right = -160.0
+offset_bottom = 95.0
+grow_horizontal = 0
 text = "Host and Connect"
+
+[node name="ReconnectButton" type="Button" parent="Menu" unique_id=1947638210]
+visible = false
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -320.0
+offset_top = 96.0
+offset_right = -160.0
+offset_bottom = 127.0
+grow_horizontal = 0
+text = "Reconnect & Reclaim"
 
 [node name="DisconnectButton" type="Button" parent="Menu" unique_id=396112843]
 visible = false
-layout_mode = 0
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -320.0
 offset_top = 96.0
-offset_right = 152.0
+offset_right = -160.0
 offset_bottom = 127.0
+grow_horizontal = 0
 text = "Disconnect"
 
 [node name="SimulateTimeoutButton" type="Button" parent="Menu" unique_id=734826195]
 visible = false
-layout_mode = 0
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -320.0
 offset_top = 128.0
-offset_right = 152.0
+offset_right = -160.0
 offset_bottom = 159.0
+grow_horizontal = 0
 text = "Simulate Timeout"
 
 [node name="ConnectingLabel" type="Label" parent="Menu" unique_id=312984756]
@@ -133,17 +214,14 @@ vertical_alignment = 1
 [node name="CancelButton" type="Button" parent="Menu" unique_id=523847219]
 visible = false
 layout_mode = 1
-anchors_preset = 8
-anchor_left = 0.5
-anchor_top = 0.5
-anchor_right = 0.5
-anchor_bottom = 0.5
-offset_left = -50.0
-offset_top = 16.0
-offset_right = 50.0
-offset_bottom = 47.0
-grow_horizontal = 2
-grow_vertical = 2
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -320.0
+offset_top = 128.0
+offset_right = -160.0
+offset_bottom = 159.0
+grow_horizontal = 0
 text = "Cancel"
 
 [node name="StopServerButton" type="Button" parent="Menu" unique_id=654321987]
@@ -151,8 +229,10 @@ layout_mode = 1
 anchors_preset = 1
 anchor_left = 1.0
 anchor_right = 1.0
-offset_left = -152.0
-offset_bottom = 31.0
+offset_left = -320.0
+offset_top = 160.0
+offset_right = -160.0
+offset_bottom = 191.0
 grow_horizontal = 0
 text = "Stop Server"
 
@@ -233,6 +313,25 @@ use_collision = true
 radius = 1.0
 material = SubResource("StandardMaterial3D_obp5r")
 
+[node name="OfflineBall" type="RigidBody3D" parent="Map" unique_id=1000010001]
+editor_description = "Local-only ball — not networked. Each client runs an independent simulation, so it is intentionally non-interactive: collision_layer = 4 (OfflineProps, bit 3) and collision_mask = 1 (Environment only). Players do NOT collide with it, so a player walking through this ball cannot be pushed back by the local-only body — that bidirectional push would create a position desync against the server (which has no offline-ball collider for the server-player) and the resulting reconciliation would jerk the player. The ball still falls under gravity and rests on the floor; OfflineRigidbody3D keeps its state stable across client rollback."
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5, 1, 5)
+collision_layer = 4
+physics_material_override = SubResource("PhysicsMaterial_ball")
+linear_damp = 0.4
+angular_damp = 0.8
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Map/OfflineBall" unique_id=1000010002]
+mesh = SubResource("SphereMesh_orangeball")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Map/OfflineBall" unique_id=1000010003]
+shape = SubResource("SphereShape3D_orangeball")
+
+[node name="OfflineRigidbody" type="Node" parent="Map/OfflineBall" unique_id=1000010004 node_paths=PackedStringArray("Body")]
+script = ExtResource("14_offrb")
+Body = NodePath("..")
+metadata/_custom_type_script = "uid://df8rhrcg15uax"
+
 [node name="NetworkStatusPanel" type="VBoxContainer" parent="." unique_id=550312741]
 anchors_preset = 1
 anchor_left = 1.0
@@ -263,9 +362,12 @@ horizontal_alignment = 2
 
 [connection signal="pressed" from="Menu/SpawnButton" to="." method="OnSpawnButtonPressed"]
 [connection signal="pressed" from="Menu/SpawnBallButton" to="." method="OnSpawnBallButtonPressed"]
+[connection signal="pressed" from="Menu/SpawnVehicleButton" to="." method="OnSpawnVehicleButtonPressed"]
+[connection signal="pressed" from="Menu/ClaimVehicleButton" to="." method="OnClaimVehicleButtonPressed"]
 [connection signal="pressed" from="Menu/HostButton" to="." method="OnHostButtonPressed"]
 [connection signal="pressed" from="Menu/ConnectButton" to="." method="OnConnectButtonPressed"]
 [connection signal="pressed" from="Menu/HostAndConnectButton" to="." method="OnHostAndConnectButtonPressed"]
+[connection signal="pressed" from="Menu/ReconnectButton" to="." method="OnReconnectButtonPressed"]
 [connection signal="pressed" from="Menu/DisconnectButton" to="." method="OnDisconnectButtonPressed"]
 [connection signal="pressed" from="Menu/SimulateTimeoutButton" to="." method="OnSimulateTimeoutButtonPressed"]
 [connection signal="pressed" from="Menu/CancelButton" to="." method="OnCancelButtonPressed"]

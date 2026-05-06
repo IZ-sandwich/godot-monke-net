@@ -13,6 +13,14 @@ namespace MonkeNet.Server;
 [GlobalClass]
 public partial class ServerEntityManager : InternalServerComponent
 {
+    /// <summary>
+    /// Game-defined approval policy for client-initiated authority requests. Returns
+    /// true to grant ownership, false to reject. Default is reject — the game must
+    /// opt-in by assigning this delegate so an unconfigured server doesn't let any
+    /// peer claim any entity. Signature: <c>(requesterClientId, entityId) → approved</c>.
+    /// </summary>
+    public System.Func<int, int, bool> OwnershipApprover { get; set; }
+
     private EntitySpawner _entitySpawner;
     private int _entityIdCount = 0;
     private int _lastEntitiesPacked = 0;
@@ -45,30 +53,93 @@ public partial class ServerEntityManager : InternalServerComponent
             {
                 var entity = _entitySpawner.Entities.Find(e => e.EntityId == entityId);
                 if (entity == null || entity.Authority != 0) continue;
-
-                entity.Authority = clientId;
-                var entityRoot = _entitySpawner.GetEntityRoot(entity);
-                SendCommandToClient(clientId, new EntityEventMessage
-                {
-                    Event = EntityEventEnum.Destroyed,
-                    EntityId = entity.EntityId,
-                    EntityType = entity.EntityType,
-                    Authority = 0,
-                    Metadata = entity.Metadata
-                }, INetworkManager.PacketModeEnum.Reliable, (int)ChannelEnum.EntityEvent);
-                SendCommandToClient(clientId, new EntityEventMessage
-                {
-                    Event = EntityEventEnum.Created,
-                    EntityId = entity.EntityId,
-                    EntityType = entity.EntityType,
-                    Authority = clientId,
-                    Position = entityRoot?.GlobalPosition ?? Vector3.Zero,
-                    Yaw = entityRoot?.GlobalRotation.Y ?? 0f,
-                    Metadata = entity.Metadata
-                }, INetworkManager.PacketModeEnum.Reliable, (int)ChannelEnum.EntityEvent);
+                ChangeAuthority(entityId, clientId);
                 MonkeLogger.Info($"ServerEntityManager: entity {entityId} reclaimed by client {clientId}");
             }
         }
+
+        if (command is OwnershipChangeRequestMessage ownershipReq)
+        {
+            HandleOwnershipRequest(clientId, ownershipReq.EntityId);
+        }
+    }
+
+    private void HandleOwnershipRequest(int requesterId, int entityId)
+    {
+        var entity = _entitySpawner.Entities.Find(e => e.EntityId == entityId);
+        // Reject silently if entity doesn't exist — the requester gets a rejection so
+        // any anticipated client flip can revert. We don't log at warn level because
+        // a stale request from a client that just saw an entity destroyed is normal.
+        bool approved = entity != null
+                        && OwnershipApprover != null
+                        && OwnershipApprover(requesterId, entityId);
+
+        if (approved)
+        {
+            ChangeAuthority(entityId, requesterId);
+        }
+        else
+        {
+            SendCommandToClient(requesterId, new OwnershipChangeRejectedMessage { EntityId = entityId },
+                INetworkManager.PacketModeEnum.Reliable, (int)ChannelEnum.GameReliable);
+        }
+    }
+
+    /// <summary>
+    /// Reassigns ownership of a server-authoritative entity. Mutates the entity's Authority
+    /// in place and notifies the old and new owner clients so their local representations
+    /// swap between the predicted (LocalScene) and interpolated (DummyScene) views. Other
+    /// clients are not notified — their dummy view is correct regardless of which peer owns
+    /// the entity. <paramref name="newAuthority"/> = 0 means the server reclaims ownership.
+    /// </summary>
+    public void ChangeAuthority(int entityId, int newAuthority)
+    {
+        var entity = _entitySpawner.Entities.Find(e => e.EntityId == entityId);
+        if (entity == null)
+        {
+            MonkeLogger.Warn($"ChangeAuthority: entity {entityId} not found on server");
+            return;
+        }
+
+        int oldAuthority = entity.Authority;
+        if (oldAuthority == newAuthority) return;
+
+        entity.Authority = newAuthority;
+        var entityRoot = _entitySpawner.GetEntityRoot(entity);
+        Vector3 pos = entityRoot?.GlobalPosition ?? Vector3.Zero;
+        float yaw = entityRoot?.GlobalRotation.Y ?? 0f;
+
+        // Send Destroy + Create to the old owner (so they swap from Local to Dummy) and to
+        // the new owner (so they swap from Dummy to Local). authority == 0 is the server
+        // itself, which has no client-side view to swap.
+        if (oldAuthority != 0)
+            SendDestroyCreatePair(oldAuthority, entity, newAuthority, pos, yaw);
+        if (newAuthority != 0)
+            SendDestroyCreatePair(newAuthority, entity, newAuthority, pos, yaw);
+
+        MonkeLogger.Info($"ChangeAuthority: entity {entityId} authority {oldAuthority} -> {newAuthority}");
+    }
+
+    private static void SendDestroyCreatePair(int targetClientId, NetworkBehaviour entity, int newAuthority, Vector3 pos, float yaw)
+    {
+        SendCommandToClient(targetClientId, new EntityEventMessage
+        {
+            Event = EntityEventEnum.Destroyed,
+            EntityId = entity.EntityId,
+            EntityType = entity.EntityType,
+            Authority = 0,
+            Metadata = entity.Metadata,
+        }, INetworkManager.PacketModeEnum.Reliable, (int)ChannelEnum.EntityEvent);
+        SendCommandToClient(targetClientId, new EntityEventMessage
+        {
+            Event = EntityEventEnum.Created,
+            EntityId = entity.EntityId,
+            EntityType = entity.EntityType,
+            Authority = newAuthority,
+            Position = pos,
+            Yaw = yaw,
+            Metadata = entity.Metadata,
+        }, INetworkManager.PacketModeEnum.Reliable, (int)ChannelEnum.EntityEvent);
     }
 
     protected override void OnClientConnected(int clientId)
@@ -91,6 +162,18 @@ public partial class ServerEntityManager : InternalServerComponent
         foreach (var entity in _entitySpawner.Entities)
             if (entity.Authority == clientId)
                 entity.Authority = 0;
+    }
+
+    /// <summary>
+    /// Destroys an entity only if it is currently orphaned (Authority == 0).
+    /// Used by the reclaim-expiry sweep to clean up entities whose owners never reconnected,
+    /// without clobbering entities that were reclaimed in the meantime.
+    /// </summary>
+    public void DestroyOrphanedEntity(int entityId)
+    {
+        var entity = _entitySpawner.Entities.Find(e => e.EntityId == entityId);
+        if (entity == null || entity.Authority != 0) return;
+        DestroyEntity(entityId, (int)NetworkManagerEnet.AudienceMode.Broadcast);
     }
 
     /// <summary>
@@ -185,12 +268,15 @@ public partial class ServerEntityManager : InternalServerComponent
     {
         foreach (NetworkBehaviour entity in _entitySpawner.Entities)
         {
+            var entityRoot = _entitySpawner.GetEntityRoot(entity);
             var entityEvent = new EntityEventMessage
             {
                 Event = EntityEventEnum.Created,
                 EntityId = entity.EntityId,
                 EntityType = entity.EntityType,
                 Authority = entity.Authority,
+                Position = entityRoot?.GlobalPosition ?? Vector3.Zero,
+                Yaw = entityRoot?.GlobalRotation.Y ?? 0f,
                 Metadata = entity.Metadata
             };
 

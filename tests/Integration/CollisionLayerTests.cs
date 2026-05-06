@@ -1,6 +1,8 @@
+using GameDemo;
 using GdUnit4;
 using Godot;
 using MonkeNet.Client;
+using MonkeNet.Shared;
 using static GdUnit4.Assertions;
 
 namespace MonkeNet.Tests.Integration;
@@ -87,6 +89,62 @@ public class CollisionLayerTests
             .IsNotNull();
 
         instance.QueueFree();
+    }
+
+    // CL-05 ────────────────────────────────────────────────────────────────────
+    // DummyBall must be a RigidBody3D so non-owner players can push it via
+    // CharacterBody3D slide-collision impulses (StaticBody3D rejects impulses).
+    [TestCase]
+    public void DummyBall_IsRigidBody3D_SoLocalPushesAreFelt()
+    {
+        var scene = ResourceLoader.Load<PackedScene>("res://demo/ball/DummyBall.tscn");
+        var instance = scene.Instantiate<CollisionObject3D>();
+
+        AssertThat(instance is RigidBody3D)
+            .OverrideFailureMessage("DummyBall must be a RigidBody3D so other players' push impulses take effect locally; was " + instance.GetType().Name)
+            .IsTrue();
+
+        instance.QueueFree();
+    }
+
+    // CL-06 ────────────────────────────────────────────────────────────────────
+    // DummyBallStateInterpolation must overwrite LinearVelocity/AngularVelocity from
+    // the server snapshot so local physics extrapolates along the authoritative vector
+    // between snapshots. Otherwise the body would integrate stale velocity for a tick.
+    [TestCase]
+    public void DummyBallStateInterpolation_WritesVelocityFromSnapshot()
+    {
+        var scene = ResourceLoader.Load<PackedScene>("res://demo/ball/DummyBall.tscn");
+        var ball = scene.Instantiate<RigidBody3D>();
+
+        DummyBallStateInterpolation interp = null;
+        foreach (Node child in ball.GetChildren())
+            if (child is DummyBallStateInterpolation d) { interp = d; break; }
+        AssertThat(interp).IsNotNull();
+
+        var past = new EntityStateMessage
+        {
+            EntityId = 1,
+            Position = Vector3.Zero,
+            Rotation = Vector3.Zero,
+            Velocity = Vector3.Zero,
+            AngularVelocity = Vector3.Zero,
+        };
+        var future = new EntityStateMessage
+        {
+            EntityId = 1,
+            Position = new Vector3(0.1f, 0, 0),       // small delta — soft-correct path
+            Rotation = Vector3.Zero,
+            Velocity = new Vector3(3, 0, 0),
+            AngularVelocity = new Vector3(0, 5, 0),
+        };
+
+        interp!.HandleStateInterpolation(past, future, 1f);
+
+        AssertThat(ball.LinearVelocity).IsEqual(future.Velocity);
+        AssertThat(ball.AngularVelocity).IsEqual(future.AngularVelocity);
+
+        ball.QueueFree();
     }
 
     // CL-04 ────────────────────────────────────────────────────────────────────

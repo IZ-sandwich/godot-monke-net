@@ -13,9 +13,31 @@ public partial class FirstPersonCameraController : Node3D
     private Callable _networkReadyCallable;
     private bool _networkReadySubscribed;
 
+    // Camera yaw and pitch are held on RotationHelperY/Camera and are not part of any
+    // synced entity state, so a fresh LocalPlayer spawn after a reclaim would otherwise
+    // start facing the default direction. Saved on _ExitTree only when a reclaim is
+    // pending (so an ordinary scene close doesn't pollute the next session) and applied
+    // one-shot in _Ready of the next LocalPlayer instance.
+    private static float _savedYaw;
+    private static float _savedPitch;
+    private static bool _hasSavedRotation;
+
     public override void _Ready()
     {
         _rotationHelperY = GetParent<Node3D>();
+
+        if (_hasSavedRotation)
+        {
+            _hasSavedRotation = false;
+            var helperRot = _rotationHelperY.Rotation;
+            helperRot.Y = _savedYaw;
+            _rotationHelperY.Rotation = helperRot;
+
+            var cameraRot = Rotation;
+            cameraRot.X = _savedPitch;
+            Rotation = cameraRot;
+        }
+
         var cm = ClientManager.Instance;
         if (cm?.IsNetworkReady == true)
         {
@@ -32,6 +54,18 @@ public partial class FirstPersonCameraController : Node3D
 
     public override void _ExitTree()
     {
+        // Capture camera state only when a reclaim is pending — i.e. the user was disconnected
+        // and the saved session token is sitting in ClientEntityManager waiting for the next
+        // NetworkReady. Saving unconditionally would also fire on app shutdown / fresh-game
+        // restarts and pollute the next session's initial facing direction.
+        if (ClientEntityManager.HasSavedReclaimToken
+            && _rotationHelperY != null && IsInstanceValid(_rotationHelperY))
+        {
+            _savedYaw = _rotationHelperY.Rotation.Y;
+            _savedPitch = Rotation.X;
+            _hasSavedRotation = true;
+        }
+
         Input.MouseMode = Input.MouseModeEnum.Visible;
         if (_networkReadySubscribed && _subscribedManager != null && IsInstanceValid(_subscribedManager))
         {

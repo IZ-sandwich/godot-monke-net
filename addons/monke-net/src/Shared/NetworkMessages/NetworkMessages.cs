@@ -146,3 +146,31 @@ public struct ReclaimEntityMessage : IPackableMessage
     public void ReadBytes(MessageReader reader) { Token = reader.ReadString(); }
     public readonly void WriteBytes(MessageWriter writer) { writer.Write(Token); }
 }
+
+/// <summary>
+/// Client → server: "I'd like to take ownership of this entity." The server runs the
+/// game-defined approval policy (see <c>ServerEntityManager.OwnershipApprover</c>) and
+/// either calls <c>ChangeAuthority</c> (which sends the Destroy+Create pair) on approval
+/// or replies with <see cref="OwnershipChangeRejectedMessage"/>.
+/// </summary>
+public struct OwnershipChangeRequestMessage : IPackableMessage
+{
+    public required int EntityId { get; set; }
+
+    public void ReadBytes(MessageReader reader) { EntityId = reader.ReadInt32(); }
+    public readonly void WriteBytes(MessageWriter writer) { writer.Write(EntityId); }
+}
+
+/// <summary>
+/// Server → requester: explicit rejection of an <see cref="OwnershipChangeRequestMessage"/>.
+/// Used by Step-3b's anticipated client-side flip to revert without waiting for a
+/// timeout. On a default Step-3a setup (no anticipated flip), receiving this is a no-op
+/// the client can ignore — there's no provisional state to undo.
+/// </summary>
+public struct OwnershipChangeRejectedMessage : IPackableMessage
+{
+    public required int EntityId { get; set; }
+
+    public void ReadBytes(MessageReader reader) { EntityId = reader.ReadInt32(); }
+    public readonly void WriteBytes(MessageWriter writer) { writer.Write(EntityId); }
+}

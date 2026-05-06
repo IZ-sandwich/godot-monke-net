@@ -14,6 +14,14 @@ public partial class NetworkManagerEnet : Node, INetworkManager
         Server = 1
     }
 
+    // Per-peer ENet timeout applied in OnPeerConnected. Defaults intentionally exceed
+    // ENet's built-in floor/ceiling (5s/30s) so a few-second loss burst doesn't kill
+    // an otherwise healthy session. Same values apply on both sides, so the server's
+    // view of a peer and the peer's view of the server time out at the same scale.
+    public static int PeerTimeoutLimit { get; set; } = 32;
+    public static int PeerTimeoutMinMs { get; set; } = 10_000;
+    public static int PeerTimeoutMaxMs { get; set; } = 60_000;
+
     private int _networkId = 0;
     private SceneMultiplayer _multiplayer;
     private readonly HashSet<int> _connectedPeers = new();
@@ -31,9 +39,13 @@ public partial class NetworkManagerEnet : Node, INetworkManager
     // does not share a peer with the server-side NetworkManagerEnet.
     public void UseCustomMultiplayer(SceneMultiplayer multiplayer)
     {
-        // Close the current peer cleanly before discarding the old SceneMultiplayer,
-        // so the server receives a proper disconnect notification.
-        (_multiplayer?.MultiplayerPeer as ENetMultiplayerPeer)?.Close();
+        // Do NOT close `_multiplayer.MultiplayerPeer` here. At listen-server startup,
+        // _multiplayer is the global SceneMultiplayer that the server-side
+        // NetworkManagerEnet shares — its peer is the server's ENet peer that was
+        // just bound by CreateServer. Closing it would kill the server before the
+        // first handshake. SubscribeToMultiplayer just rewires our subscriptions
+        // to the new (client-only) multiplayer; no peer cleanup is needed because
+        // the client hasn't created its own peer yet.
         SubscribeToMultiplayer(multiplayer);
     }
 
@@ -116,6 +128,8 @@ public partial class NetworkManagerEnet : Node, INetworkManager
         }
         else
         {
+            if (!_connectedPeers.Contains(id))
+                return;
             _multiplayer.SendBytes(bin, id, m, channel);
         }
     }
@@ -163,6 +177,13 @@ public partial class NetworkManagerEnet : Node, INetworkManager
     private void OnPeerConnected(long id)
     {
         _connectedPeers.Add((int)id);
+        // Only direct ENet peers live in ENetMultiplayerPeer's peers map. On a server
+        // (local id 1) every peer_connected is direct. On a client (local id != 1) only
+        // id 1 (the server) is direct — other ids are server_relay notifications about
+        // peer-to-peer connections, and GetPeer would error with "!peers.has(p_id)".
+        bool isDirectPeer = _multiplayer.GetUniqueId() == 1 || (int)id == 1;
+        if (isDirectPeer && _multiplayer.MultiplayerPeer is ENetMultiplayerPeer enetPeer)
+            enetPeer.GetPeer((int)id)?.SetTimeout(PeerTimeoutLimit, PeerTimeoutMinMs, PeerTimeoutMaxMs);
         ClientConnected?.Invoke(id);
     }
 

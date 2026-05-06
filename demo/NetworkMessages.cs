@@ -37,6 +37,29 @@ public struct EntityStateMessage : IEntityStateData
     public readonly IPackableElement GetCopy() => this;
 }
 
+// Client → server: "I'm done driving this vehicle, return authority to the server."
+// Counterpart to the framework's OwnershipChangeRequestMessage which only claims, never
+// releases. The server validates that the sender is the current authority before
+// calling ChangeAuthority(eid, 0).
+public struct ReleaseVehicleMessage : IPackableMessage
+{
+    public required int EntityId { get; set; }
+
+    public void ReadBytes(MessageReader reader) { EntityId = reader.ReadInt32(); }
+    public readonly void WriteBytes(MessageWriter writer) { writer.Write(EntityId); }
+}
+
+// Client → server: spawn a vehicle owned by the *server*, not the requester.
+// The framework's EntityRequestMessage always sets authority = requester, which would
+// instantly hand the spawning client predicted ownership and trigger the rider anchor.
+// Vehicles must spawn unowned so any nearby player can claim one via the F-key
+// proximity flow — that's the whole point of the interaction prompt.
+public struct SpawnVehicleRequestMessage : IPackableMessage
+{
+    public void ReadBytes(MessageReader reader) { }
+    public readonly void WriteBytes(MessageWriter writer) { }
+}
+
 // Character inputs sent to the server by a local player every tick.
 // MoveX/MoveY carry analog values (-1..1) so controller sticks work correctly.
 // Keyboard produces exactly -1/0/1; a controller stick produces values in between.

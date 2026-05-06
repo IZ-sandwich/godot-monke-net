@@ -243,6 +243,46 @@ public class InputTests
         dummyEntity.Free();
     }
 
+    // J-09 ─────────────────────────────────────────────────────────────────────
+    // MaximumServerReplicates protects the server from a flood of far-future inputs.
+    // When the cap is exceeded, the oldest queued ticks are evicted. We invoke the
+    // private RegisterCommand directly because the public OnCommandReceived path filters
+    // by spawned-entity authority, which would require staging a full entity spawn.
+    [TestCase]
+    public async Task Server_FloodOfInputsCappedAtMaximumServerReplicates()
+    {
+        var receiver = _server.GetNode<ServerInputReceiver>("ServerInputReceiver");
+        receiver.MaximumServerReplicates = 10;
+
+        var entity = new MonkeNet.Shared.NetworkBehaviour();
+        entity.Authority = 7;
+
+        var inputs = new IPackableElement[50];
+        for (int i = 0; i < 50; i++)
+            inputs[i] = new CharacterInputMessage { Keys = (byte)(i + 1) };
+        var inputMsg = new PackedClientInputMessage { Tick = 100, Inputs = inputs };
+
+        // Reach RegisterCommand directly — bypasses the entity-authority filter in
+        // OnCommandReceived since this dummy entity isn't spawned.
+        var register = typeof(ServerInputReceiver).GetMethod(
+            "RegisterCommand", BindingFlags.NonPublic | BindingFlags.Instance);
+        register!.Invoke(receiver, new object[] { entity, inputMsg });
+
+        var pendingTicks = typeof(ServerInputReceiver)
+            .GetField("_pendingTicksPerEntity", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?.GetValue(receiver) as Dictionary<MonkeNet.Shared.NetworkBehaviour, SortedSet<int>>;
+
+        AssertThat(pendingTicks).IsNotNull();
+        AssertThat(pendingTicks!.ContainsKey(entity)).IsTrue();
+        AssertThat(pendingTicks[entity].Count).IsEqual(10);
+        // Oldest evicted, newest retained: ticks 100-9..100 should remain.
+        AssertThat(pendingTicks[entity].Min).IsEqual(91);
+        AssertThat(pendingTicks[entity].Max).IsEqual(100);
+        AssertThat(receiver.GetTrimmedInputTotal()).IsEqual(40);
+
+        entity.Free();
+    }
+
     // J-08 ─────────────────────────────────────────────────────────────────────
     // Within the stale-input timeout window, the last received input is repeated
     // so brief packet loss does not freeze the entity.

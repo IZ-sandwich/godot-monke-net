@@ -219,6 +219,32 @@ public partial class ClientManager : Node
         _entityManager.MakeEntityRequest(entityType);
     }
 
+    /// <summary>
+    /// Asks the server to transfer authority of <paramref name="entityId"/> to this client.
+    /// Server runs <c>ServerEntityManager.OwnershipApprover</c>; on approve, the normal
+    /// Destroy+Create authority-swap path runs, on reject the client receives an
+    /// <see cref="OwnershipChangeRejectedMessage"/>. Default policy is reject — the game
+    /// must register an approver server-side or no request will ever succeed.
+    /// </summary>
+    public void RequestAuthority(int entityId)
+    {
+        SendCommandToServer(new OwnershipChangeRequestMessage { EntityId = entityId },
+            INetworkManager.PacketModeEnum.Reliable, (int)ChannelEnum.GameReliable);
+    }
+
+    /// <summary>
+    /// Anticipated variant of <see cref="RequestAuthority"/>: flips the local entity's
+    /// scene from dummy to predicted immediately so the player can drive it without
+    /// waiting one RTT for server confirmation. On reject (or timeout) the client
+    /// reverts to the dummy at the original pose. Use when responsiveness matters
+    /// (vehicle entry, item pickup) and a brief revert-flicker on rejection is
+    /// acceptable.
+    /// </summary>
+    public void RequestAuthorityAnticipated(int entityId)
+    {
+        _entityManager.RequestAuthorityAnticipated(entityId);
+    }
+
     public int GetNetworkId()
     {
         return _networkManager.GetNetworkId();
@@ -226,11 +252,15 @@ public partial class ClientManager : Node
 
     private void OnLatencyCalculated(int currentTick, int latencyAverageTicks, int jitterAverageTicks, int averageClockOffset)
     {
-        // MonkeLogger.Info($"At tick {currentTick}, latency calculations done. Avg. Latency {latencyAverageTicks} ticks, Jitter {jitterAverageTicks}, Offset {averageClockOffset}");
         EmitSignal(SignalName.LatencyCalculated, latencyAverageTicks, jitterAverageTicks);
-        EmitSignal(SignalName.NetworkReady); //TODO: calculate this in other way, this should only be emmited once and
-                                             //right now it will be emitted every time the clock calculates latency
-        _networkReady = true;
+
+        // NetworkReady fires exactly once per connection lifecycle. _networkReady is cleared
+        // in OnPeerDisconnected and Disconnect, so the next connection will emit again.
+        if (!_networkReady)
+        {
+            _networkReady = true;
+            EmitSignal(SignalName.NetworkReady);
+        }
     }
 
     private void DisplayDebugInformation()

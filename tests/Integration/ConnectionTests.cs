@@ -102,6 +102,37 @@ public class ConnectionTests
         AssertThat(client.IsNetworkReady).IsTrue();
     }
 
+    // C-04b ────────────────────────────────────────────────────────────────────
+    // Regression: NetworkReady was previously emitted on every latency recalc, causing
+    // UI flicker and re-firing of game-start logic each ~second. Must now fire once
+    // per connection lifecycle.
+    [TestCase]
+    public async Task NetworkReady_FiresOncePerConnection()
+    {
+        var server = _serverRunner.Scene() as ServerManager;
+        var client = _clientRunner.Scene() as ClientManager;
+        server!.Initialize(_serverNet, port: 7780);
+        client!.Initialize(_clientNet, "127.0.0.1", 7780);
+
+        var clock = _clientRunner.Scene().GetNode<ClientNetworkClock>("ClientNetworkClock");
+        typeof(ClientNetworkClock)
+            .GetField("_sampleSize", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+            ?.SetValue(clock, 1);
+
+        int emissionCount = 0;
+        client.NetworkReady += () => emissionCount++;
+
+        var timer = clock.GetNode<Godot.Timer>("Timer");
+        for (int i = 0; i < 5; i++)
+        {
+            timer.EmitSignal("timeout");
+            await _clientRunner.AwaitIdleFrame();
+        }
+
+        AssertThat(emissionCount).IsEqual(1);
+        AssertThat(client.IsNetworkReady).IsTrue();
+    }
+
     // C-05 ─────────────────────────────────────────────────────────────────────
     [TestCase]
     public async Task LatencyCalculated_HasNonNegativeValues()

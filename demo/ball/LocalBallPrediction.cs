@@ -8,13 +8,13 @@ namespace GameDemo;
 public partial class LocalBallPrediction : ClientPredictedEntity
 {
     [Export] private float _maxDeviationAllowedSquared = 0.001f;
-    [Export] private RigidBody3D _rigidBody;
+    [Export] private PredictionRigidbody3D _predictionRb;
 
     public override void OnProcessTick(int tick, IPackableElement input) { }
 
     public override Vector3 GetPosition()
     {
-        return _rigidBody.Position;
+        return _predictionRb.Body.GlobalPosition;
     }
 
     public override bool HasMisspredicted(int tick, IEntityStateData receivedState, Vector3 savedState)
@@ -26,11 +26,13 @@ public partial class LocalBallPrediction : ClientPredictedEntity
     public override void HandleReconciliation(IEntityStateData receivedState)
     {
         var state = (EntityStateMessage)receivedState;
-        _rigidBody.Position = state.Position;
-        _rigidBody.Rotation = state.Rotation;
-        _rigidBody.LinearVelocity = state.Velocity;
-        _rigidBody.AngularVelocity = state.AngularVelocity;
-        _rigidBody.ForceUpdateTransform();
+        _predictionRb.Reconcile(new RigidbodyState
+        {
+            Position = state.Position,
+            Rotation = Quaternion.FromEuler(state.Rotation),
+            LinearVelocity = state.Velocity,
+            AngularVelocity = state.AngularVelocity,
+        });
     }
 
     public override void ResimulateTick(IPackableElement input) { }

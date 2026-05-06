@@ -155,6 +155,41 @@ public class PredictionTests
         AssertThat(lastTick).IsEqual(50);
     }
 
+    // I-06: history cap drops oldest entries ──────────────────────────────────
+    [TestCase]
+    public void Prediction_HistoryCappedAtMax_DropsOldestEntries()
+    {
+        ClearPredictedStates();
+        _predictionManager.MaxRollbackTicks = 10;
+
+        for (int t = 1; t <= 20; t++)
+            _predictionManager.RegisterPrediction(t, default(CharacterInputMessage));
+
+        AssertThat(GetPredictedStateCount()).IsEqual(10);
+        AssertThat(GetOldestTick()).IsEqual(11);
+        AssertThat(GetNewestTick()).IsEqual(20);
+    }
+
+    // I-07: snapshot for a trimmed-away tick increments missed-state counter ──
+    [TestCase]
+    public void Prediction_RollbackBeyondCapTreatedAsMissedState()
+    {
+        ClearPredictedStates();
+        _predictionManager.MaxRollbackTicks = 5;
+        int initialMissed = GetMissedLocalState();
+
+        // Register 10 — first 5 (ticks 1..5) get trimmed
+        for (int t = 1; t <= 10; t++)
+            _predictionManager.RegisterPrediction(t, default(CharacterInputMessage));
+        AssertThat(GetPredictedStateCount()).IsEqual(5);
+
+        // Snapshot for a trimmed tick: predicted state is gone, count it as missed.
+        var snap = new GameSnapshotMessage { Tick = 2, States = System.Array.Empty<IEntityStateData>() };
+        _clientNet.SimulateIncomingPacket(1, MessageSerializer.Serialize(snap));
+
+        AssertThat(GetMissedLocalState()).IsGreater(initialMissed);
+    }
+
     // ── reflection helpers ─────────────────────────────────────────────────────
 
     private int GetPredictedStateCount()
@@ -184,6 +219,33 @@ public class PredictionTests
         var field = typeof(ClientPredictionManager)
             .GetField("_lastTickReceived", BindingFlags.NonPublic | BindingFlags.Instance);
         return (int)(field?.GetValue(_predictionManager) ?? 0);
+    }
+
+    private void ClearPredictedStates()
+    {
+        var field = typeof(ClientPredictionManager)
+            .GetField("_predictedStates", BindingFlags.NonPublic | BindingFlags.Instance);
+        (field?.GetValue(_predictionManager) as System.Collections.IList)?.Clear();
+    }
+
+    private int GetOldestTick()
+    {
+        var field = typeof(ClientPredictionManager)
+            .GetField("_predictedStates", BindingFlags.NonPublic | BindingFlags.Instance);
+        var list = field?.GetValue(_predictionManager) as System.Collections.IList;
+        if (list == null || list.Count == 0) return -1;
+        var stateType = typeof(ClientPredictionManager).GetNestedType("PredictedState", BindingFlags.NonPublic);
+        return (int)stateType!.GetField("Tick")!.GetValue(list[0]);
+    }
+
+    private int GetNewestTick()
+    {
+        var field = typeof(ClientPredictionManager)
+            .GetField("_predictedStates", BindingFlags.NonPublic | BindingFlags.Instance);
+        var list = field?.GetValue(_predictionManager) as System.Collections.IList;
+        if (list == null || list.Count == 0) return -1;
+        var stateType = typeof(ClientPredictionManager).GetNestedType("PredictedState", BindingFlags.NonPublic);
+        return (int)stateType!.GetField("Tick")!.GetValue(list[list.Count - 1]);
     }
 
     private void AddFakePredictedState(int tick)

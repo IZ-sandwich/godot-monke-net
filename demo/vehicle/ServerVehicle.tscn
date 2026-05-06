@@ -1,0 +1,30 @@
+[gd_scene format=3 uid="uid://b6sqb51sprj38"]
+
+[ext_resource type="Script" uid="uid://clspkwvyssj1u" path="res://demo/vehicle/ServerVehicleStateSyncronizer.cs" id="2_svss"]
+[ext_resource type="Script" uid="uid://o8fwa7kmma11" path="res://addons/monke-net/src/Shared/PredictionRigidbody3D.cs" id="3_predrb"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_veh"]
+size = Vector3(2, 1, 4)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_veh"]
+size = Vector3(2, 1, 4)
+
+[node name="ServerVehicle" type="RigidBody3D" unique_id=1602080600]
+collision_layer = 32768
+collision_mask = 32769
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=683380200]
+mesh = SubResource("BoxMesh_veh")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=2065844200]
+shape = SubResource("BoxShape3D_veh")
+
+[node name="PredictionRigidbody" type="Node" parent="." unique_id=1602080601 node_paths=PackedStringArray("_body")]
+script = ExtResource("3_predrb")
+_body = NodePath("..")
+metadata/_custom_type_script = "uid://o8fwa7kmma11"
+
+[node name="ServerStateSyncronizer" type="Node" parent="." unique_id=1324363960 node_paths=PackedStringArray("_predictionRb")]
+script = ExtResource("2_svss")
+_predictionRb = NodePath("../PredictionRigidbody")
+metadata/_custom_type_script = "uid://clh4o8hlbokjg"

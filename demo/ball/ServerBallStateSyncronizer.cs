@@ -6,7 +6,7 @@ namespace GameDemo;
 
 public partial class ServerBallStateSyncronizer : ServerStateSyncronizer
 {
-    [Export] private RigidBody3D _rigidBody;
+    [Export] private PredictionRigidbody3D _predictionRb;
 
     public override void OnEntitySpawned()
     {
@@ -15,14 +15,15 @@ public partial class ServerBallStateSyncronizer : ServerStateSyncronizer
 
     public override IEntityStateData PackEntityState()
     {
+        var state = _predictionRb.SnapshotState();
         return new EntityStateMessage
         {
             EntityId = this.EntityId,
             Yaw = 0,
-            Position = _rigidBody.Position,
-            Rotation = _rigidBody.Rotation,
-            Velocity = _rigidBody.LinearVelocity,
-            AngularVelocity = _rigidBody.AngularVelocity,
+            Position = state.Position,
+            Rotation = state.Rotation.GetEuler(),
+            Velocity = state.LinearVelocity,
+            AngularVelocity = state.AngularVelocity,
         };
     }
 }
