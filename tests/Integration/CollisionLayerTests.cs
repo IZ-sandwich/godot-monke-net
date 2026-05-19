@@ -8,20 +8,16 @@ using static GdUnit4.Assertions;
 namespace MonkeNet.Tests.Integration;
 
 /// <summary>
-/// CL-01..CL-03: Regression tests for entity scene collision layers.
+/// CL-01, CL-02, CL-04: Regression tests for entity scene collision layers.
 ///
 /// Jolt assigns a body's broad-phase layer at AddChild time from the initial
 /// node values, so the .tscn baseline must already carry the correct layer/mask.
 /// EntitySpawner runtime overrides cannot move a body between broad-phases.
 ///
-/// These tests catch the specific class of bug where a contributor edits a
-/// demo .tscn in the editor and accidentally resets collision_layer to 0,
-/// which silently breaks all collision interactions.
-///
 /// Layer convention (project.godot):
 ///   layer 1  = Environment
-///   layer 2  = ClientPlayers (LocalBall, DummyBall, LocalPlayer, DummyPlayer)
-///   layer 16 = ServerPlayers (ServerBall, ServerPlayer — listen-server hidden)
+///   layer 2  = ClientPlayers (LocalBall and all client-side networked scenes)
+///   layer 16 = ServerPlayers (ServerBall — listen-server hidden)
 /// </summary>
 [TestSuite]
 [RequireGodotRuntime]
@@ -61,92 +57,6 @@ public class CollisionLayerTests
         instance.QueueFree();
     }
 
-    // CL-03 ────────────────────────────────────────────────────────────────────
-    [TestCase]
-    public void DummyBall_ExistsAndHasClientLayerAndExtendsClientInterpolatedEntity()
-    {
-        var scene = ResourceLoader.Load<PackedScene>("res://demo/ball/DummyBall.tscn");
-        AssertThat(scene).OverrideFailureMessage("DummyBall.tscn must exist so non-authority clients can render the ball")
-                         .IsNotNull();
-        var instance = scene.Instantiate<CollisionObject3D>();
-
-        AssertThat(instance.CollisionLayer).IsEqual(LayerClientPlayers);
-        AssertThat(instance.CollisionMask).IsEqual(MaskClient);
-
-        // The script node child must extend ClientInterpolatedEntity so the
-        // snapshot interpolator can drive its transform.
-        ClientInterpolatedEntity scriptNode = null;
-        foreach (Node child in instance.GetChildren())
-        {
-            if (child is ClientInterpolatedEntity cie)
-            {
-                scriptNode = cie;
-                break;
-            }
-        }
-        AssertThat(scriptNode)
-            .OverrideFailureMessage("DummyBall.tscn must contain a child node that extends ClientInterpolatedEntity")
-            .IsNotNull();
-
-        instance.QueueFree();
-    }
-
-    // CL-05 ────────────────────────────────────────────────────────────────────
-    // DummyBall must be a RigidBody3D so non-owner players can push it via
-    // CharacterBody3D slide-collision impulses (StaticBody3D rejects impulses).
-    [TestCase]
-    public void DummyBall_IsRigidBody3D_SoLocalPushesAreFelt()
-    {
-        var scene = ResourceLoader.Load<PackedScene>("res://demo/ball/DummyBall.tscn");
-        var instance = scene.Instantiate<CollisionObject3D>();
-
-        AssertThat(instance is RigidBody3D)
-            .OverrideFailureMessage("DummyBall must be a RigidBody3D so other players' push impulses take effect locally; was " + instance.GetType().Name)
-            .IsTrue();
-
-        instance.QueueFree();
-    }
-
-    // CL-06 ────────────────────────────────────────────────────────────────────
-    // DummyBallStateInterpolation must overwrite LinearVelocity/AngularVelocity from
-    // the server snapshot so local physics extrapolates along the authoritative vector
-    // between snapshots. Otherwise the body would integrate stale velocity for a tick.
-    [TestCase]
-    public void DummyBallStateInterpolation_WritesVelocityFromSnapshot()
-    {
-        var scene = ResourceLoader.Load<PackedScene>("res://demo/ball/DummyBall.tscn");
-        var ball = scene.Instantiate<RigidBody3D>();
-
-        DummyBallStateInterpolation interp = null;
-        foreach (Node child in ball.GetChildren())
-            if (child is DummyBallStateInterpolation d) { interp = d; break; }
-        AssertThat(interp).IsNotNull();
-
-        var past = new EntityStateMessage
-        {
-            EntityId = 1,
-            Position = Vector3.Zero,
-            Rotation = Quaternion.Identity,
-            Velocity = Vector3.Zero,
-            AngularVelocity = Vector3.Zero,
-        };
-        var future = new EntityStateMessage
-        {
-            EntityId = 1,
-            Position = new Vector3(0.1f, 0, 0),       // small delta — soft-correct path
-            Rotation = Quaternion.Identity,
-            Velocity = new Vector3(3, 0, 0),
-            AngularVelocity = new Vector3(0, 5, 0),
-        };
-
-        interp!.HandleStateInterpolation(past, future, 1f);
-
-        AssertThat(ball.LinearVelocity).IsEqual(future.Velocity);
-        AssertThat(ball.AngularVelocity).IsEqual(future.AngularVelocity);
-
-        ball.QueueFree();
-    }
-
     // CL-04 ────────────────────────────────────────────────────────────────────
     [TestCase]
     public void AllBallScenes_HaveNonZeroCollisionLayer()
@@ -156,7 +66,6 @@ public class CollisionLayerTests
         string[] paths = {
             "res://demo/ball/ServerBall.tscn",
             "res://demo/ball/LocalBall.tscn",
-            "res://demo/ball/DummyBall.tscn",
         };
         foreach (string path in paths)
         {

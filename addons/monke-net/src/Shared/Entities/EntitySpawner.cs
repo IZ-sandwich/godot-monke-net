@@ -221,13 +221,11 @@ public partial class EntitySpawner : Node
     {
         if (isServerSpawn)
             return entitySpawnConfig.ServerScene;
-
-        bool isAuthority = @event.Authority == ClientManager.Instance.GetNetworkId();
-
-        if (isAuthority)
-            return entitySpawnConfig.ClientAuthorityScene;
-
-        return entitySpawnConfig.ClientDummyScene;
+        // Owner vs non-owner used to pick different scenes (predicted vs interpolated).
+        // The unified-prediction refactor collapsed both into a single ClientScene that
+        // predicts locally regardless of ownership — authority only governs whose input
+        // drives the entity.
+        return entitySpawnConfig.ClientScene;
     }
 
     private static void SetCollisionLayerRecursive(Node node, uint layer, uint mask)

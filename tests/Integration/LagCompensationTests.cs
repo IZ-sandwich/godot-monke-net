@@ -66,7 +66,7 @@ public class LagCompensationTests
     public async Task LagCompensation_HistoryBufferEvictsOldestPastCap()
     {
         // Spawn an entity so something is recorded each tick.
-        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 0, authority: 0);
+        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 1, authority: 0);
 
         // Drive enough physics ticks to overflow the buffer.
         for (int i = 0; i < 30; i++) await _serverRunner.AwaitIdleFrame();
@@ -85,7 +85,7 @@ public class LagCompensationTests
     [TestCase]
     public async Task LagCompensation_RewindsMovingEntityToPastPosition()
     {
-        var entity = ServerManager.Instance.SpawnEntity<Node3D>(entityType: 0, authority: 0);
+        var entity = ServerManager.Instance.SpawnEntity<Node3D>(entityType: 1, authority: 0);
         entity.GlobalPosition = new Vector3(0, 0, 0);
         await _serverRunner.AwaitIdleFrame();
         await _serverRunner.AwaitIdleFrame();
@@ -120,7 +120,7 @@ public class LagCompensationTests
     [TestCase]
     public async Task LagCompensation_TickBeyondHistoryFallsBackAndCounts()
     {
-        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 0, authority: 0);
+        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 1, authority: 0);
         for (int i = 0; i < 5; i++) await _serverRunner.AwaitIdleFrame();
 
         int missingBefore = _lagComp.MissingTickCount;
@@ -138,7 +138,7 @@ public class LagCompensationTests
     [TestCase]
     public async Task LagCompensation_ExcludeListSafeAndRestoresPose()
     {
-        var entity = ServerManager.Instance.SpawnEntity<Node3D>(entityType: 0, authority: 0);
+        var entity = ServerManager.Instance.SpawnEntity<Node3D>(entityType: 1, authority: 0);
         entity.GlobalPosition = new Vector3(0, 0, 0);
         await _serverRunner.AwaitIdleFrame();
         await _serverRunner.AwaitIdleFrame();

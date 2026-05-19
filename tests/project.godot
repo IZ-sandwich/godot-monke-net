@@ -17,6 +17,15 @@ config/name="MonkeNetTests"
 MonkeLogger="*uid://b7m3xwoaqrktv"
 MonkeNet="*uid://bchfwceouveq2"
 
+[physics]
+
+; Match the main project's physics settings so multi-process tests exercise the
+; same SceneTreeFTI / Jolt path the demo runs interactively. Without
+; physics_interpolation=true here, the test client process disables FTI and
+; per-render-frame smoothness tests measure un-interpolated transforms.
+3d/physics_engine="Jolt Physics"
+common/physics_interpolation=true
+
 [dotnet]
 
 project/assembly_name="MonkeNetTests"

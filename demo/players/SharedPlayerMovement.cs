@@ -8,6 +8,7 @@ public enum InputFlags
 {
     Space = 0b_0000_0001,
     Shift = 0b_0000_0010,
+    Interact = 0b_0000_0100,
 }
 
 /// <summary>

@@ -1,17 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
-using System.Text.Json;
 using System.Threading;
 using GdUnit4;
 using MonkeNet.Tests.Infrastructure;
+using MonkeNet.Tests.Infrastructure.Artifacts;
 using static GdUnit4.Assertions;
 
 namespace MonkeNet.Tests.MultiProcess;
 
 /// <summary>
-/// MP-CLOCK-01..02: clock-sync convergence in the multi-process harness.
+/// MP-CLOCK-01: clock-sync convergence in the multi-process harness.
 ///
 /// Spawns a real server + real client and samples each side's
 /// <c>clock-state</c> at ~20 Hz from the moment the client process is up.
@@ -32,9 +31,12 @@ namespace MonkeNet.Tests.MultiProcess;
 /// </summary>
 [TestSuite]
 [RequireGodotRuntime]
-public class MultiProcessClockSyncTests
+public class MultiProcessClockSyncTests : MultiProcessTestBase
 {
-    private const string ArtifactRoot = "TestResults/ClockSync";
+    protected override string ArtifactSubdir => "ClockSync";
+
+    [BeforeTest] public void SetUp() => SetUpInternal();
+    [AfterTest]  public void TearDown() => TearDownInternal();
 
     // Sample cadence + total run length. 50 ms × 200 = 10 s of trace, plenty
     // to see the ramp-up and a few steady-state cycles after the first sync
@@ -42,65 +44,28 @@ public class MultiProcessClockSyncTests
     private const int SampleIntervalMs = 50;
     private const int RunMs = 10_000;
 
-    // Photon-Fusion-2-class convergence target.
-    //
-    // Measured from the first sample (= moment the client process is observable
-    // by the orchestrator, roughly process-start) to the first run of converged
-    // samples where |client_synced − server − latency| ≤ ConvergedAbsGapTicks.
-    //
-    // Fusion documents "0.5-1 s on LAN to a stable few-tick prediction"; we set
-    // the bar at 1000 ms / ±5 ticks / 4-sample (200 ms) stable streak.
-    //
-    // This deliberately FAILS the current MonkeNet implementation, where the
-    // first averaged correction only fires after _sampleSize (3) samples at
-    // 1 Hz = ~3 s, leaving the client at gap≈-60 ticks for the first 2-3 s.
-    // The follow-up clock-sync improvements (per-sample correction + fast-start
-    // ramp + smooth ramp instead of a big step) bring this under 1 s.
+    // Photon-Fusion-2-class convergence target. See file's original
+    // doc-comment block for the rationale.
     private const int ConvergeWithinMs = 1_000;
     private const int ConvergedAbsGapTicks = 5;
     private const int ConsecutiveConvergedSamples = 4;   // 4 × 50 ms = 200 ms stable
 
-    private static int _enetPortCounter = 9400;
-
-    private string _godotBin;
-    private string _projectPath;
-    private MultiProcessOrchestrator _orch;
-
-    [BeforeTest]
-    public void SetUp()
-    {
-        _godotBin = System.Environment.GetEnvironmentVariable("GODOT_BIN");
-        if (string.IsNullOrEmpty(_godotBin) || !File.Exists(_godotBin)) return;
-
-        _projectPath = ResolveProjectPath();
-        Directory.CreateDirectory(Path.Combine(_projectPath, ArtifactRoot));
-        _orch = new MultiProcessOrchestrator(_godotBin, _projectPath);
-    }
-
-    [AfterTest]
-    public void TearDown()
-    {
-        _orch?.Dispose();
-        _orch = null;
-    }
-
-    // MP-CLOCK-01 ──────────────────────────────────────────────────────────────
-    // Convergence target. Connects a client, samples both sides' clock state
-    // for 10 s, and asserts the gap is within budget within ConvergeWithinMs.
     [TestCase]
     public void MultiProcess_ClockSync_ConvergesWithinFusionClassWindow()
     {
-        if (_orch == null) return;
+        if (Orch == null) return;
 
         int port = NextPort();
-        var server = _orch.Spawn("server", enetPort: port, label: "srv");
+        var server = Orch.Spawn("server", enetPort: port, label: "srv");
         server.WaitReady(networkReady: true, timeoutMs: 30_000);
 
-        // Spawn the client and DO NOT wait for it to be networkReady — we want to
-        // capture the entire ramp-up including the pre-sync window. Sampling
-        // starts as soon as the orch socket accepts, then we identify the
-        // "connect moment" post-hoc as the first sample where networkReady=true.
-        var client = _orch.Spawn("client", enetPort: port, label: "c1");
+        // Spawn the client and DO NOT wait for it to be networkReady — we
+        // want to capture the entire ramp-up including the pre-sync window.
+        // Sampling starts as soon as the orch socket accepts, then we identify
+        // the "connect moment" post-hoc as the first sample where
+        // networkReady=true. We bypass SpawnPair() for this reason — it would
+        // block until networkReady true on the client, skipping the early ramp.
+        var client = Orch.Spawn("client", enetPort: port, label: "c1");
 
         var samples = new List<ClockSyncPlot.Sample>();
         long t0Ms = -1;
@@ -114,14 +79,14 @@ public class MultiProcessClockSyncTests
             Thread.Sleep(SampleIntervalMs);
         }
 
-        // Populate client.RemoteLogPath via one ready cmd so WriteArtifacts can
-        // copy the per-process log. We intentionally don't WaitReady at the
-        // start so that pre-network-ready samples are captured in the trace.
+        // Populate client.RemoteLogPath via one ready cmd so log copy works
+        // (intentionally not done at the start so pre-network-ready samples
+        // are captured in the trace).
         try { client.WaitReady(networkReady: false, timeoutMs: 2_000); } catch { }
 
-        WriteArtifacts("clock_sync", samples, t0Ms, server, client);
+        var paths = ArtifactsFor("clock_sync");
+        WriteArtifacts(paths, samples, t0Ms, server, client);
 
-        // For diagnostic context: when did networkReady first transition true?
         long connectMsRel = -1;
         foreach (var s in samples)
         {
@@ -134,7 +99,7 @@ public class MultiProcessClockSyncTests
             .OverrideFailureMessage(
                 $"clock-sync gap never converged below ±{ConvergedAbsGapTicks} ticks for " +
                 $"{ConsecutiveConvergedSamples} consecutive samples ({ConsecutiveConvergedSamples * SampleIntervalMs} ms). " +
-                $"Trace + plot at {ArtifactRoot}/clock_sync.{{csv,by_tick.svg,by_wallclock.svg}}. " +
+                $"Trace + plot at TestResults/ClockSync/clock_sync.{{csv,by_tick.svg,by_wallclock.svg}}. " +
                 $"Last sample's gap was {(samples.Count > 0 ? samples[^1].ClientSyncedTick - samples[^1].ServerTick - samples[^1].LatencyTicks : 0)} ticks.")
             .IsGreaterEqual(0);
 
@@ -143,16 +108,12 @@ public class MultiProcessClockSyncTests
         AssertThat(convergedAtMsRel)
             .OverrideFailureMessage(
                 $"clock-sync took {convergedAtMsRel} ms from process start to converge (Fusion-class budget {ConvergeWithinMs} ms). " +
-                $"networkReady fired at +{connectMsRel} ms. Plot at {ArtifactRoot}/clock_sync.by_wallclock.svg")
+                $"networkReady fired at +{connectMsRel} ms. Plot at TestResults/ClockSync/clock_sync.by_wallclock.svg")
             .IsLessEqual(ConvergeWithinMs);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
-    private static int NextPort() => Interlocked.Increment(ref _enetPortCounter);
-
-    // One paired sample. Calls server then client (clock-state is idempotent +
-    // cheap). Returns null on any error so the sampling loop can press on.
     private static ClockSyncPlot.Sample SampleClocks(TestProcess server, TestProcess client)
     {
         try
@@ -181,9 +142,6 @@ public class MultiProcessClockSyncTests
         }
     }
 
-    // Walks the trace looking for the first window of ConsecutiveConvergedSamples
-    // samples where |gap| ≤ ConvergedAbsGapTicks. Returns the ms-since-t0 at the
-    // start of the streak, or -1 if no such streak exists.
     private static long FindConvergenceMsRel(List<ClockSyncPlot.Sample> samples, long t0Ms)
     {
         int streak = 0;
@@ -208,47 +166,21 @@ public class MultiProcessClockSyncTests
         return -1;
     }
 
-    private void WriteArtifacts(string label, List<ClockSyncPlot.Sample> samples, long t0Ms,
+    private void WriteArtifacts(ArtifactPaths paths, List<ClockSyncPlot.Sample> samples, long t0Ms,
         TestProcess server, TestProcess client)
     {
-        var dir = Path.Combine(_projectPath, ArtifactRoot);
-        Directory.CreateDirectory(dir);
-        var csv = Path.Combine(dir, label + ".csv");
-        var svgByTick = Path.Combine(dir, label + ".by_tick.svg");
-        var svgByWall = Path.Combine(dir, label + ".by_wallclock.svg");
-        ClockSyncPlot.WriteCsv(csv, samples, t0Ms);
+        var svgByTick = System.IO.Path.Combine(paths.Directory,
+            System.IO.Path.GetFileNameWithoutExtension(paths.Svg) + ".by_tick.svg");
+        var svgByWall = System.IO.Path.Combine(paths.Directory,
+            System.IO.Path.GetFileNameWithoutExtension(paths.Svg) + ".by_wallclock.svg");
+        ClockSyncPlot.WriteCsv(paths.Csv, samples, t0Ms);
         ClockSyncPlot.WriteSvgByNetworkTick(svgByTick, samples, "Clock sync — by client synced tick");
         ClockSyncPlot.WriteSvgByWallClock(svgByWall, samples, "Clock sync — by wall-clock ms", t0Ms);
-        Godot.GD.Print($"[MP-CLOCK] wrote {csv}, {svgByTick}, {svgByWall} ({samples.Count} samples)");
+        Godot.GD.Print($"[MP-CLOCK] wrote {paths.Csv}, {svgByTick}, {svgByWall} ({samples.Count} samples)");
 
-        CopyProcessLog(dir, server.RemoteLogPath, label + ".server.log");
-        CopyProcessLog(dir, client.RemoteLogPath, label + ".client.log");
-    }
-
-    private static void CopyProcessLog(string artifactDir, string srcPath, string targetName)
-    {
-        if (string.IsNullOrEmpty(srcPath)) return;
-        if (!File.Exists(srcPath)) return;
-        try
-        {
-            using var src = new FileStream(srcPath, FileMode.Open, System.IO.FileAccess.Read, FileShare.ReadWrite);
-            using var dst = new FileStream(Path.Combine(artifactDir, targetName), FileMode.Create, System.IO.FileAccess.Write, FileShare.Read);
-            src.CopyTo(dst);
-        }
-        catch (Exception ex)
-        {
-            Godot.GD.PrintErr($"[MP-CLOCK] failed to copy {srcPath}: {ex.Message}");
-        }
-    }
-
-    private static string ResolveProjectPath()
-    {
-        var dir = new DirectoryInfo(System.Environment.CurrentDirectory);
-        while (dir != null)
-        {
-            if (File.Exists(Path.Combine(dir.FullName, "project.godot"))) return dir.FullName;
-            dir = dir.Parent;
-        }
-        throw new InvalidOperationException("Could not locate project.godot from current working directory");
+        // ClockSync has its own log paths since SpawnPair was not used; copy
+        // them manually via the base-class helper.
+        CopyProcessLog(paths.Directory, server.RemoteLogPath, System.IO.Path.GetFileName(paths.ServerLog));
+        CopyProcessLog(paths.Directory, client.RemoteLogPath, System.IO.Path.GetFileName(paths.ClientLog));
     }
 }

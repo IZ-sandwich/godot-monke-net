@@ -16,6 +16,14 @@ public struct EntityStateMessage : IEntityStateData
     // many snapshots — especially noticeable on tumbling rigidbodies (ball, vehicle).
     public Quaternion Rotation { get; set; }
     public float Yaw { get; set; } // Looking angle
+    // Authoritative sleep flag, mirrored directly from RigidBody3D.Sleeping on the
+    // server. Velocity-inferred sleep (vel² < ε) flickers on the wake-up tick because
+    // the broadcast tick can see a body that's just-been-impulsed but hasn't moved
+    // yet, or a body that's about to sleep but still carries 0.02 m/s drift. An
+    // explicit bool is binary and lets the client latch "stay at rest" decisions
+    // without ambiguity. Mirror's NetworkRigidbody and Fusion's NetworkRigidbody
+    // carry the same hint for the same reason.
+    public bool ServerSleeping { get; set; }
 
     public void ReadBytes(MessageReader reader)
     {
@@ -25,6 +33,7 @@ public struct EntityStateMessage : IEntityStateData
         AngularVelocity = reader.ReadVector3();
         Rotation = reader.ReadQuaternion();
         Yaw = reader.ReadSingle();
+        ServerSleeping = reader.ReadByte() != 0;
     }
 
     public readonly void WriteBytes(MessageWriter writer)
@@ -35,6 +44,7 @@ public struct EntityStateMessage : IEntityStateData
         writer.Write(AngularVelocity);
         writer.Write(Rotation);
         writer.Write(Yaw);
+        writer.Write((byte)(ServerSleeping ? 1 : 0));
     }
 
     public readonly IPackableElement GetCopy() => this;
@@ -43,19 +53,7 @@ public struct EntityStateMessage : IEntityStateData
         $"eid={EntityId} pos=({Position.X:F3},{Position.Y:F3},{Position.Z:F3}) "
         + $"vel=({Velocity.X:F3},{Velocity.Y:F3},{Velocity.Z:F3}) "
         + $"rot=({Rotation.X:F3},{Rotation.Y:F3},{Rotation.Z:F3},{Rotation.W:F3}) "
-        + $"angvel=({AngularVelocity.X:F3},{AngularVelocity.Y:F3},{AngularVelocity.Z:F3}) yaw={Yaw:F3}";
-}
-
-// Client → server: "I'm done driving this vehicle, return authority to the server."
-// Counterpart to the framework's OwnershipChangeRequestMessage which only claims, never
-// releases. The server validates that the sender is the current authority before
-// calling ChangeAuthority(eid, 0).
-public struct ReleaseVehicleMessage : IPackableMessage
-{
-    public required int EntityId { get; set; }
-
-    public void ReadBytes(MessageReader reader) { EntityId = reader.ReadInt32(); }
-    public readonly void WriteBytes(MessageWriter writer) { writer.Write(EntityId); }
+        + $"angvel=({AngularVelocity.X:F3},{AngularVelocity.Y:F3},{AngularVelocity.Z:F3}) yaw={Yaw:F3} sleep={ServerSleeping}";
 }
 
 // Client → server: spawn a vehicle owned by the *server*, not the requester.

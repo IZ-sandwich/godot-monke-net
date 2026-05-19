@@ -1,6 +1,6 @@
 [gd_scene format=3 uid="uid://hnno4lwknkkq"]
 
-[ext_resource type="Script" uid="uid://b8b0gwk6gllyg" path="res://demo/ball/LocalBallPrediction.cs" id="2_lcubepred"]
+[ext_resource type="Script" uid="uid://b8b0gwk6gllyg" path="res://demo/LocalRigidPropPrediction.cs" id="2_lcubepred"]
 [ext_resource type="Script" uid="uid://o8fwa7kmma11" path="res://addons/monke-net/src/Shared/PredictionRigidbody3D.cs" id="3_predrb"]
 [ext_resource type="Script" uid="uid://rp5ifdkt35gg" path="res://addons/monke-net/src/Shared/PredictionVisualSmoothing3D.cs" id="4_smooth"]
 
@@ -23,14 +23,18 @@ physics_material_override = SubResource("PhysicsMaterial_cube")
 linear_damp = 0.4
 angular_damp = 0.8
 
-; VisualRoot is top_level so the smoother can write its world transform each
-; render frame without being parented to the body. Mesh hangs off this node so
-; reconcile snaps move the BODY immediately (collision stays authoritative)
-; while the mesh trails behind via the offset-decay model implemented in
-; PredictionVisualSmoothing3D — visual = body + offset, offset decays linearly
-; to zero over DurationSec.
+; VisualRoot is a regular (non-top_level) child of the body so Godot's
+; SceneTreeFTI lerps it in lockstep with the body's other inherited children
+; (CollisionShape3D's debug wireframe, labels, etc.) every render frame. The
+; smoother writes Visual.GlobalPosition = body.GlobalPosition + offset; Godot
+; internally computes the corresponding local Position relative to the body,
+; so the mesh tracks the body's interpolated render-frame pose plus the
+; (decaying) offset. With top_level=true the smoother's writes bypassed FTI's
+; parent-chain interpolation, leaving the mesh stair-stepped at physics-tick
+; rate while sibling children were rendered smoothly — visible as a
+; mesh-vs-label oscillation every other render frame and as a 1–2 frame lag
+; behind the body's debug wireframe.
 [node name="VisualRoot" type="Node3D" parent="." unique_id=1700010006]
-top_level = true
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="VisualRoot" unique_id=1700010002]
 mesh = SubResource("BoxMesh_cube")

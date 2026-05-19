@@ -174,6 +174,17 @@ public class ClockTests
     // cleared so the next averaged window doesn't re-add the same pre-
     // correction offset on top of the immediate one (which would yank the
     // clock backwards right as the window completes).
+    //
+    // The post-correction syncs must keep the offset BELOW the immediate-
+    // correction threshold; otherwise they'd take the fast-path again and
+    // re-clear the buffer, masking the bug this test is meant to catch. We
+    // capture the raw tick afresh at each injection so the synthesised
+    // serverTime tracks _currentTick — any ProcessTicks that fire during the
+    // awaits don't push the inferred offset outside the windowed-path
+    // tolerance band. A single cached alignedServerTick would let the offset
+    // grow with each ProcessTick and made the test flaky in the suite (where
+    // physics-frame catch-up can advance _currentTick by 5–10 ticks per idle
+    // frame), even though it passed in isolation.
     [TestCase]
     public async Task Clock_ImmediateCorrection_ClearsBuffersToAvoidWindowDoubleCount()
     {
@@ -188,19 +199,25 @@ public class ClockTests
         bool fired = false;
         _client.LatencyCalculated += (_, __) => fired = true;
 
-        // Subsequent samples mimic post-correction state: server-time close
-        // to client's current synced tick (raw tick now ~= 80 from the
-        // immediate correction, before any ProcessTick advances).
-        int alignedServerTick = GetCurrentRawTick();
-        InjectClockSyncEchoToClient(alignedServerTick, (int)Godot.Time.GetTicksMsec());
-        InjectClockSyncEchoToClient(alignedServerTick, (int)Godot.Time.GetTicksMsec());
+        // Each post-correction sync uses the current raw tick as ServerTime,
+        // so the inferred offset stays ≈0 regardless of how many ProcessTicks
+        // the engine has run since the immediate correction.
+        InjectAlignedSync();
+        InjectAlignedSync();
         await _clientRunner.AwaitIdleFrame();
         AssertThat(fired).IsFalse(); // buffer still only has 2 post-correction samples
 
-        InjectClockSyncEchoToClient(alignedServerTick, (int)Godot.Time.GetTicksMsec()); // 3rd → window emits
+        InjectAlignedSync(); // 3rd → window emits
         await _clientRunner.AwaitIdleFrame();
         AssertThat(fired).IsTrue();
     }
+
+    // Injects a clock-sync echo whose ServerTime equals the client's current
+    // raw tick. The resulting offset estimate is ≈0 ticks (well below
+    // _immediateCorrectionMinAbsTicks=10), so the sync takes the windowed-
+    // average path rather than re-triggering the fast-correction path.
+    private void InjectAlignedSync() =>
+        InjectClockSyncEchoToClient(GetCurrentRawTick(), (int)Godot.Time.GetTicksMsec());
 
     // B-05 ─────────────────────────────────────────────────────────────────────
     [TestCase]

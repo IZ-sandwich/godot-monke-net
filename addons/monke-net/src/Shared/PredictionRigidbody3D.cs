@@ -22,20 +22,21 @@ public partial class PredictionRigidbody3D : Node
     [Export] private RigidBody3D _body;
 
     /// <summary>
-    /// Optional. When set, <see cref="Reconcile"/> hands the visual root's pre-jump pose
-    /// to the smoother so the visible mesh lags behind the body for a few ticks instead
-    /// of snapping. Leave null on entities that don't need it (no jarring jumps under
-    /// normal play, or sphere meshes where rotation snaps aren't visible).
+    /// Optional. When set, the smoother auto-detects body teleports (from
+    /// Reconcile, SyncSleepState, or any other transform write) and absorbs them
+    /// into a decaying visual offset. No notification call is needed — wiring
+    /// the smoother in the inspector is enough. Leave null on entities that
+    /// don't need it (sphere meshes where rotation snaps are invisible, props
+    /// that never jump under normal play).
     /// </summary>
     [Export] private PredictionVisualSmoothing3D _smoothing;
 
     public RigidBody3D Body => _body;
 
     /// <summary>
-    /// Optional visual smoother wired in the inspector. Exposed so prediction entities
-    /// can route soft-correction offsets through the visual root instead of mutating
-    /// the body's transform — see <see cref="PredictionVisualSmoothing3D.AddDriftCorrection"/>.
-    /// Returns null when no smoother is wired (sphere meshes, props that don't need it).
+    /// Optional visual smoother wired in the inspector. Exposed for diagnostics
+    /// / tests that want to observe smoothing state. Returns null when none is
+    /// wired.
     /// </summary>
     public PredictionVisualSmoothing3D Smoothing => _smoothing;
 
@@ -155,23 +156,11 @@ public partial class PredictionRigidbody3D : Node
     {
         if (_body == null) return;
 
-        // Capture the visual's current world pose BEFORE we teleport the body so the
-        // smoother can keep the visible mesh exactly there and lerp it back over a few
-        // ticks. Done here (not inside the smoother) so we read the actual rendered
-        // pose, not whatever the smoother last wrote to it.
-        Vector3 preVisualPos = Vector3.Zero;
-        Quaternion preVisualRot = Quaternion.Identity;
-        bool smoothingEnabled = _smoothing != null && _smoothing.Visual != null;
-        if (smoothingEnabled)
-        {
-            preVisualPos = _smoothing.Visual.GlobalPosition;
-            preVisualRot = _smoothing.Visual.Quaternion;
-        }
-
         Vector3 prePos = _body.GlobalPosition;
         Vector3 preVel = _body.LinearVelocity;
         Vector3 posDelta = authoritative.Position - prePos;
         Vector3 velDelta = authoritative.LinearVelocity - preVel;
+        bool smoothingEnabled = _smoothing != null && _smoothing.Visual != null;
         MonkeLogger.Debug($"[PHYS-RB-RECONCILE] body={_body.Name} prePos=({prePos.X:F3},{prePos.Y:F3},{prePos.Z:F3}) -> authPos=({authoritative.Position.X:F3},{authoritative.Position.Y:F3},{authoritative.Position.Z:F3}) |posDelta|={posDelta.Length():F4} preVel=({preVel.X:F3},{preVel.Y:F3},{preVel.Z:F3}) -> authVel=({authoritative.LinearVelocity.X:F3},{authoritative.LinearVelocity.Y:F3},{authoritative.LinearVelocity.Z:F3}) |velDelta|={velDelta.Length():F4} smoothing={smoothingEnabled} pendingDropped={_pending.Count}");
 
         // Atomic Transform set propagates Position + Rotation to the physics
@@ -198,8 +187,75 @@ public partial class PredictionRigidbody3D : Node
         // bogus interpolated frame between two unrelated rotations. ResetPhysicsInterpolation
         // collapses both buffers to the new transform, so the body teleports cleanly.
         _body.ResetPhysicsInterpolation();
+    }
 
-        if (smoothingEnabled)
-            _smoothing.OnReconciled(preVisualPos, preVisualRot);
+    // Tight tolerances for "we already match this target" — used only by SnapToRest,
+    // which only ever runs when both sides agree the body is at rest. 1 mm² and 0.1°
+    // are well below any legitimate Jolt micro-drift, so passing them means the body
+    // is already where the server wants it and no write is needed.
+    private const float SnapToRestPosToleranceSq = 1e-6f;     // (1e-3 m)² = 1 mm²
+    private const float SnapToRestRotToleranceRad = 0.001745f; // ~0.1°
+    // Velocities are considered "already zero" when each component is below this
+    // magnitude. Slightly looser than the position tolerance because Jolt's integrator
+    // can leave a few μm/s residue even on bodies that finished the step at rest.
+    private const float SnapToRestVelEpsilonSq = 1e-8f;
+
+    /// <summary>
+    /// Surgical "at-rest re-anchor" for sleep sync. Compares the body's current pose
+    /// and velocities against the target; writes only what's actually different and
+    /// skips <c>ResetPhysicsInterpolation</c> / <c>ForceUpdateTransform</c> when the
+    /// transform doesn't change. Unlike <see cref="Reconcile"/> this does NOT clear
+    /// <c>ConstantForce</c> / <c>ConstantTorque</c> or the pending queue — those are
+    /// the caller's responsibility on misprediction rollback, not on sleep sync (a
+    /// resting body has neither constant forces nor queued ops by definition).
+    ///
+    /// The whole point is to avoid invalidating Jolt's persistent contact manifolds
+    /// on every snapshot when the body is already where the server says it is.
+    /// Any body-interface transform write activates the body and flags its broadphase
+    /// entry dirty, forcing manifold re-detection on the next step — which produces
+    /// μm-scale normal-impulse drift that propagates up a stack as visible jitter on
+    /// stacked / piled bodies. Mirror, FishNet, and Fusion 2 all gate body writes on
+    /// a state-delta tolerance for exactly this reason.
+    /// </summary>
+    public void SnapToRest(Vector3 position, Quaternion rotation)
+    {
+        if (_body == null) return;
+
+        Vector3 curPos = _body.GlobalPosition;
+        Quaternion curRot = _body.Quaternion;
+        Vector3 curLinVel = _body.LinearVelocity;
+        Vector3 curAngVel = _body.AngularVelocity;
+
+        float posDeltaSq = (position - curPos).LengthSquared();
+        float rotDelta = curRot.AngleTo(rotation);
+        bool poseNeedsUpdate = posDeltaSq > SnapToRestPosToleranceSq
+                               || rotDelta > SnapToRestRotToleranceRad;
+        bool velNeedsZero = curLinVel.LengthSquared() > SnapToRestVelEpsilonSq
+                            || curAngVel.LengthSquared() > SnapToRestVelEpsilonSq;
+
+        if (!poseNeedsUpdate && !velNeedsZero)
+        {
+            // Already at the target — no body writes, no manifold invalidation. This
+            // is the hot path for a body that has fully settled on the server pose.
+            MonkeLogger.Debug($"[PHYS-RB-SNAP-REST] body={_body.Name} noop posDeltaSq={posDeltaSq:F8} rotDelta={rotDelta:F6}");
+            return;
+        }
+
+        MonkeLogger.Debug($"[PHYS-RB-SNAP-REST] body={_body.Name} poseWrite={poseNeedsUpdate} velZero={velNeedsZero} posDeltaSq={posDeltaSq:F8} rotDelta={rotDelta:F6}");
+
+        if (poseNeedsUpdate)
+        {
+            _body.GlobalTransform = new Transform3D(new Basis(rotation), position);
+            _body.ForceUpdateTransform();
+            // Only collapse physics-interpolation buffers when we actually moved the
+            // body; for a velocity-only zero-out the existing interpolated frame is
+            // already correct.
+            _body.ResetPhysicsInterpolation();
+        }
+        if (velNeedsZero)
+        {
+            _body.LinearVelocity = Vector3.Zero;
+            _body.AngularVelocity = Vector3.Zero;
+        }
     }
 }

@@ -41,7 +41,7 @@ public class PerformanceRegressionTests
     {
         MonkeNetConfig.Instance = null;
         FakeNetworkBridge.Reset();
-        ClientEntityManager.ClearSavedReclaimToken();
+        ClientEntityManager.ClearAwaitingReconnect();
         MessageSerializer.RegisterNetworkMessages();
         (_serverNet, _clientNet) = FakeNetworkBridge.CreatePair();
 
@@ -98,7 +98,7 @@ public class PerformanceRegressionTests
         // Spawn 4 server entities owned by the client peer so they appear as
         // ClientPredictedEntity instances on the client.
         for (int i = 0; i < 4; i++)
-            ServerManager.Instance.SpawnEntity<Node3D>(entityType: 0, authority: _clientNet.GetNetworkId());
+            ServerManager.Instance.SpawnEntity<Node3D>(entityType: 1, authority: _clientNet.GetNetworkId());
         await _serverRunner.AwaitIdleFrame();
         await _clientRunner.AwaitIdleFrame();
 
@@ -193,7 +193,7 @@ public class PerformanceRegressionTests
         var predictionManager = (ClientPredictionManager)_client.GetNode("PredictionManager");
 
         // Need an owned entity so RegisterPrediction has work each tick.
-        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 0, authority: _clientNet.GetNetworkId());
+        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 1, authority: _clientNet.GetNetworkId());
         await _serverRunner.AwaitIdleFrame();
         await _clientRunner.AwaitIdleFrame();
 

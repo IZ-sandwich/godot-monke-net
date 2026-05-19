@@ -1,40 +1,49 @@
-using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Threading;
 using GdUnit4;
 using Godot;
 using MonkeNet.Tests.Infrastructure;
+using MonkeNet.Tests.Infrastructure.Artifacts;
 using static GdUnit4.Assertions;
 
 namespace MonkeNet.Tests.MultiProcess;
 
 /// <summary>
-/// MP-OFFSET-PUSH-01: Multi-process rigid-player vs. rigid-cube offset-push scenario.
+/// MP-OFFSET-PUSH-01: Multi-process rigid-player vs. rigid-cube offset-push.
 /// A single cube is spawned slightly offset from the player's forward axis so a
 /// straight-line charge clips it off-centre — applying simultaneous linear push
-/// AND angular spin from the contact lever arm. The point of the test is to
-/// visualise the client-side body position over time and observe the
-/// reconciliation snap that fires near the end of the push motion (when the
-/// local Jolt sim and the server Jolt sim diverge enough on contact normals /
-/// spin axis to trip <c>HasMisspredicted</c> on the cube).
+/// AND angular spin from the contact lever arm. The test covers three concerns
+/// at once:
+///
+/// 1. <b>Push-drift tolerance</b>: a small per-tick velocity perturbation is
+///    injected into the server-side cube via <c>apply-impulse</c> (server-only)
+///    so the trace shows the cube's server replica drifting steadily from the
+///    client replica. A correct push formula must not amplify that drift into
+///    the player; the plot makes any such amplification visible as a widening
+///    gap on the player traces.
+/// 2. <b>Reconcile snap absorption</b>: at <c>TeleportInjectTick</c> the test
+///    fires <c>teleport-entity</c> on the server — a deliberate +30 cm jump
+///    that guarantees the client will trip <c>HasMisspredicted</c> on the
+///    cube. The assertion checks that the client body converges to within
+///    5 cm of the server's authoritative pose within 10 ticks of the snap,
+///    and that the visual mesh never jumps more than 30 cm in a single tick
+///    (i.e. <c>PredictionVisualSmoothing3D</c> absorbed the snap).
+/// 3. <b>Trace + video record</b>: every tick captures both server and client
+///    state into the CSV so all three behaviours are visualisable side-by-side.
 ///
 /// Artefacts written under <c>TestResults/OffsetPushPlots/</c>:
-///   - offset_push.csv   (tick, eid, type, x, y, z, vx, vy, vz)
-///   - offset_push.svg   (player + cube X/Z trajectories, misprediction markers)
+///   - offset_push.csv   (per-tick per-(role, entity); role ∈ {server, client})
+///   - offset_push.svg   (cube X server vs client, visual.X, player Z, mispredict markers)
 ///   - offset_push.mp4   (in-engine viewport recording of the windowed client)
-///
-/// This is a baseline test: the cube currently has NO visual/physics separation,
-/// so the server reconcile pushes the body itself when <c>HasMisspredicted</c>
-/// trips. The next step in the work plan is to introduce a separate visual node
-/// and lerp it toward the body — at which point the same test should still show
-/// a snap on the BODY trace but a smooth trace on the VISUAL trace.
 /// </summary>
 [TestSuite]
 [RequireGodotRuntime]
-public class MultiProcessOffsetPushTests
+public class MultiProcessOffsetPushTests : MultiProcessTestBase
 {
-    private const string ArtifactRoot = "TestResults/OffsetPushPlots";
+    protected override string ArtifactSubdir => "OffsetPushPlots";
+
+    [BeforeTest] public void SetUp() => SetUpInternal();
+    [AfterTest]  public void TearDown() => TearDownInternal();
+
     private const byte EntityTypeRigidPlayer = 3;
     private const byte EntityTypeCube = 4;
 
@@ -54,20 +63,10 @@ public class MultiProcessOffsetPushTests
     private const float PlayerStartY = 0f;
 
     // ── timing ───────────────────────────────────────────────────────────────
-    // Brief warmup so clock-sync stabilises before any entities spawn.
     private const int SnapshotArmTicks = 60;
-    // Ticks given to the cube to fall onto the floor and stop bouncing before
-    // we spawn the player + drive input.
     private const int CubeSettleTicks = 90;
-    // After spawning the player, wait this long for its own free-fall to
-    // complete before issuing forward input. Anchored to the CLIENT tick so
-    // the input schedule lands on the same tick across runs.
     private const int PlayerFallTicks = 90;
-    // Length of the scripted run in physics ticks. 60 Hz physics, so 120 ticks
-    // = 2 s of total run time. The full sequence — player charges, contacts
-    // cube, releases, cube coasts, snap fires — completes well inside that
-    // window with current tuning.
-    private const int RunTicks = 120;
+    private const int RunTicks = 150;
     // How long the player keeps pressing forward before releasing. From the
     // anchor (when forward input begins) the player needs ~30 ticks to close
     // the 4 m gap to the cube; we keep pushing for a few ticks AFTER first
@@ -77,55 +76,27 @@ public class MultiProcessOffsetPushTests
     // is no continuous contact reaction keeping both Jolt sims in lockstep,
     // so they evolve independently and the snap at end-of-coast is loudest.
     private const int PressForwardTicks = 42;
-    // Sample cadence. 2 ticks = 30 samples/s of position data, dense enough
-    // for the SVG snap event to be a single-pixel discontinuity in the line.
     private const int SnapshotIntervalTicks = 2;
 
-    private static int _enetPortCounter = 9400;
+    // Per-tick server-only velocity perturbation injected into the cube to
+    // model cross-process Jolt drift. 0.01 m/s is well below realistic Jolt
+    // cross-process drift bursts (which can hit tens of mm/s during stacked
+    // contact), small enough that it doesn't itself trip a reconcile, but
+    // large enough that the cube's server replica visibly diverges from the
+    // client replica on the plot over the run.
+    private const float DriftInjectionVelocityZ = 0.01f;
 
-    private string _godotBin;
-    private string _projectPath;
-    private MultiProcessOrchestrator _orch;
-    private string _serverLogPath;
-    private string _clientLogPath;
-
-    [BeforeTest]
-    public void SetUp()
-    {
-        _godotBin = System.Environment.GetEnvironmentVariable("GODOT_BIN");
-        if (string.IsNullOrEmpty(_godotBin) || !File.Exists(_godotBin)) return; // skipped
-        _projectPath = ResolveProjectPath();
-        Directory.CreateDirectory(Path.Combine(_projectPath, ArtifactRoot));
-        _orch = new MultiProcessOrchestrator(_godotBin, _projectPath);
-    }
-
-    [AfterTest]
-    public void TearDown()
-    {
-        _orch?.Dispose();
-        _orch = null;
-    }
+    // Reconcile-event budgets (replaces the dedicated PredictReplay test).
+    private const float ConvergenceToleranceM = 0.05f;
+    private const int ConvergenceTickBudget = 10;
+    private const float MaxVisualJumpPerTickM = 0.30f;
 
     [TestCase]
     public void MultiProcess_RigidPlayer_OffsetPushesCube_RendersTraceAndVideo()
     {
-        if (_orch == null) return;
+        if (Orch == null) return;
 
-        int port = NextPort();
-        var server = _orch.Spawn("server", enetPort: port, label: "srv");
-        server.WaitReady(networkReady: true, timeoutMs: 30_000);
-
-        string videoPath = Path.Combine(_projectPath, ArtifactRoot, "offset_push.mp4");
-        var client = _orch.Spawn("client", enetPort: port, label: "c1", recordVideoPath: videoPath);
-        client.WaitReady(networkReady: true, timeoutMs: 30_000);
-
-        _serverLogPath = server.RemoteLogPath;
-        _clientLogPath = client.RemoteLogPath;
-
-        WaitForClockSync(server, client, maxGapTicks: 5, timeoutMs: 5_000);
-
-        int clientNetId = client.NetworkId;
-        AssertThat(clientNetId).OverrideFailureMessage("client must have a non-zero ENet peer id").IsNotEqual(0);
+        var (server, client) = SpawnPair("offset_push", recordVideo: true);
 
         server.WaitForTicks(SnapshotArmTicks);
 
@@ -165,19 +136,11 @@ public class MultiProcessOffsetPushTests
 
         server.WaitForTicks(CubeSettleTicks);
 
-        int playerEid = SpawnEntity(server, EntityTypeRigidPlayer, clientNetId,
+        int playerEid = SpawnEntity(server, EntityTypeRigidPlayer, client.NetworkId,
             0f, PlayerStartY, PlayerStartZ);
 
-        // Anchor the input schedule to the client's clock, not wall time, so
-        // the same input fires on the same tick across runs.
         int anchorTick = client.ReadClientTick() + PlayerFallTicks;
 
-        // Schedule: idle while falling → forward for PressForwardTicks (long
-        // enough to make contact + deliver an initial push) → release for
-        // the rest of the run while the cube coasts to rest. Releasing
-        // mid-push maximises divergence between the client and server cube
-        // sims (no continuous contact-reaction force coupling them anymore),
-        // so the snap at end-of-coast is loudest.
         var schedule = new List<object>
         {
             new { tick = anchorTick - PlayerFallTicks,    moveX = 0.0, moveY = 0.0,  yaw = 0.0, keys = 0 },
@@ -190,36 +153,45 @@ public class MultiProcessOffsetPushTests
         client.WaitForClientTick(anchorTick);
         int baselineMispredicts = ReadMispredictCount(client);
 
-        // Sample loop with a deterministic divergence injection. Cross-process
-        // Jolt is determinism-limited and run-to-run divergence varies from
-        // sub-mm to several cm — too noisy to demonstrate the smoother
-        // reliably. At TeleportInjectTick the test issues a server-side
-        // teleport that moves the cube ~30 cm sideways out of band. The next
-        // snapshot arrives with the new pose, the client mispredicts vs its
-        // own sim, HandleReconciliation fires, and PredictionRigidbody3D.
-        // Reconcile snaps the body while handing the pre-visual pose to the
-        // smoother. The trace then shows: a discontinuous step on the body
-        // line and a smooth ramp on the visual line — the architectural
-        // signature of the offset-decay model.
-        const int TeleportInjectTick = 95;   // ~mid-coast, cube still moving
-        const float TeleportOffsetX = 0.3f;  // 30 cm sideways jump
-        bool injected = false;
+        const int TeleportInjectTick = 120;
+        const float TeleportOffsetX = 0.5f;
+        bool teleportFired = false;
+        int teleportSampleIndex = -1;
+        int teleportMispredictsBaseline = 0;
+        int reconcileSampleIndex = -1;
+        Vector3 cubeServerPoseAtReconcile = Vector3.Zero;
 
-        var samples = new List<MultiProcessMispredictTests.Sample>();
+        var clientSamples = new List<Sample>();
+        var serverSamples = new List<Sample>();
         for (int t = SnapshotIntervalTicks; t <= RunTicks; t += SnapshotIntervalTicks)
         {
             int targetTick = anchorTick + t;
             client.WaitForClientTick(targetTick);
-            samples.Add(CaptureSample(client, targetTick));
+            var cSample = CaptureSample(client, targetTick);
+            var sSample = CaptureSample(server, targetTick);
+            clientSamples.Add(cSample);
+            serverSamples.Add(sSample);
 
-            if (!injected && t >= TeleportInjectTick)
+            // Per-tick server-only drift injection on the cube. Modelled
+            // cross-process Jolt drift — small per-tick velocity perturbation
+            // visible on the plot as a slow gap between server.cube and
+            // client.cube traces. apply-impulse with targetRole="server" is a
+            // no-op on the client process.
+            server.Send(new
             {
-                // Read the cube's current server-side position by snapping
-                // the client view (cheap proxy for the server pose since
-                // they're in close sync at this point). Then teleport the
-                // server cube 30 cm along +X.
+                cmd = "apply-impulse",
+                entity_id = cubeEid,
+                deltaLinearVelocity = new[] { 0.0, 0.0, (double)DriftInjectionVelocityZ },
+                targetRole = "server",
+            });
+
+            // One-shot reconcile event — a deliberate teleport on the server
+            // guaranteed to trip the client's HasMisspredicted path and exercise
+            // PredictionRigidbody3D.Reconcile + the visual smoother.
+            if (!teleportFired && t >= TeleportInjectTick)
+            {
                 Vector3 cubePos = Vector3.Zero;
-                foreach (var e in samples[samples.Count - 1].Entities)
+                foreach (var e in cSample.Entities)
                 {
                     if (e.Id == cubeEid) { cubePos = e.Position; break; }
                 }
@@ -229,23 +201,42 @@ public class MultiProcessOffsetPushTests
                     entity_id = cubeEid,
                     position = new[] { (double)(cubePos.X + TeleportOffsetX), cubePos.Y, cubePos.Z },
                 });
-                injected = true;
+                teleportFired = true;
+                teleportSampleIndex = clientSamples.Count - 1;
+                teleportMispredictsBaseline = cSample.MispredictionsCount;
+                cubeServerPoseAtReconcile = new Vector3(cubePos.X + TeleportOffsetX, cubePos.Y, cubePos.Z);
+            }
+        }
+
+        // Find the first sample tick AFTER the teleport where the client's
+        // misprediction count rises above the baseline captured at teleport time.
+        // Filtering by teleportSampleIndex matters because per-tick drift
+        // injection on the server can cause mispredicts during the push phase
+        // — those are unrelated to the teleport reconcile being measured here.
+        if (teleportSampleIndex >= 0)
+        {
+            for (int i = teleportSampleIndex; i < clientSamples.Count; i++)
+            {
+                if (clientSamples[i].MispredictionsCount > teleportMispredictsBaseline)
+                {
+                    reconcileSampleIndex = i;
+                    break;
+                }
             }
         }
 
         int finalMispredicts = ReadMispredictCount(client);
         int mispredictsThisRun = finalMispredicts - baselineMispredicts;
 
-        WriteArtifacts("offset_push", samples, playerEid, cubeEid, baselineMispredicts);
+        var paths = ArtifactsFor("offset_push");
+        WriteCombinedPlot(paths, clientSamples, serverSamples, playerEid, cubeEid, baselineMispredicts);
+        CopyProcessLogs(paths);
 
-        // The test is observational: we want the artefacts written, regardless
-        // of misprediction count. Assert only that we collected real samples
-        // covering both entities so the graph isn't silently empty.
-        AssertThat(samples.Count)
+        AssertThat(clientSamples.Count)
             .OverrideFailureMessage("expected non-empty sample stream")
             .IsGreater(0);
         bool sawPlayer = false, sawCube = false;
-        foreach (var s in samples)
+        foreach (var s in clientSamples)
         {
             foreach (var e in s.Entities)
             {
@@ -255,168 +246,321 @@ public class MultiProcessOffsetPushTests
         }
         AssertThat(sawPlayer && sawCube)
             .OverrideFailureMessage($"trace must include both player ({playerEid}) and cube ({cubeEid}). " +
-                $"mispredicts={mispredictsThisRun}. Artefacts at {ArtifactRoot}/offset_push.{{csv,svg,mp4}}")
+                $"mispredicts={mispredictsThisRun}. Artefacts at TestResults/OffsetPushPlots/offset_push.{{csv,svg,mp4}}")
             .IsTrue();
 
-        Godot.GD.Print($"[MP-OFFSET-PUSH] run complete: {samples.Count} samples, " +
+        // ── reconcile-event validations (replaces PredictReplay test) ────────
+        // After the server-side teleport fires at TeleportInjectTick, the
+        // client must observe a misprediction within the sample stream AND
+        // converge to within 5 cm of the new server pose within 10 ticks.
+        AssertThat(reconcileSampleIndex)
+            .OverrideFailureMessage(
+                $"client never observed a misprediction after the teleport reconcile at tick {anchorTick + TeleportInjectTick}. " +
+                $"Trace at TestResults/OffsetPushPlots/offset_push.{{csv,svg,mp4}}")
+            .IsGreaterEqual(0);
+
+        if (reconcileSampleIndex >= 0)
+        {
+            int convergeIndex = -1;
+            float maxBodyError = 0f;
+            for (int i = reconcileSampleIndex; i < clientSamples.Count; i++)
+            {
+                Vector3 cBody = Vector3.Zero;
+                foreach (var e in clientSamples[i].Entities)
+                {
+                    if (e.Id == cubeEid) { cBody = e.Position; break; }
+                }
+                float err = Mathf.Abs(cBody.X - cubeServerPoseAtReconcile.X);
+                if (err > maxBodyError) maxBodyError = err;
+                if (err <= ConvergenceToleranceM && convergeIndex < 0)
+                    convergeIndex = i - reconcileSampleIndex;
+            }
+            AssertThat(convergeIndex)
+                .OverrideFailureMessage(
+                    $"client body did not converge to within {ConvergenceToleranceM:F3} m of the server's " +
+                    $"reconciled X={cubeServerPoseAtReconcile.X:F3} within {ConvergenceTickBudget} ticks " +
+                    $"(SnapshotIntervalTicks={SnapshotIntervalTicks}; max error {maxBodyError:F3} m). " +
+                    $"Trace at TestResults/OffsetPushPlots/offset_push.{{csv,svg,mp4}}")
+                .IsBetween(0, ConvergenceTickBudget);
+
+            // Visual jump per tick must stay smooth — that's the smoother's job.
+            float maxVisualJump = 0f;
+            Vector3 prevVisual = Vector3.Zero;
+            bool havePrev = false;
+            foreach (var s in clientSamples)
+            {
+                foreach (var e in s.Entities)
+                {
+                    if (e.Id != cubeEid) continue;
+                    if (havePrev)
+                    {
+                        float j = (e.VisualPosition - prevVisual).Length();
+                        if (j > maxVisualJump) maxVisualJump = j;
+                    }
+                    prevVisual = e.VisualPosition;
+                    havePrev = true;
+                }
+            }
+            AssertThat(maxVisualJump)
+                .OverrideFailureMessage(
+                    $"cube visual mesh jumped {maxVisualJump:F3} m in a single tick (budget {MaxVisualJumpPerTickM:F3} m). " +
+                    $"PredictionVisualSmoothing3D should have absorbed the body snap. " +
+                    $"Trace at TestResults/OffsetPushPlots/offset_push.{{csv,svg,mp4}}")
+                .IsLessEqual(MaxVisualJumpPerTickM);
+        }
+
+        Godot.GD.Print($"[MP-OFFSET-PUSH] run complete: {clientSamples.Count} samples (client+server), " +
             $"{mispredictsThisRun} mispredictions over {RunTicks} ticks. " +
-            $"Artefacts: {ArtifactRoot}/offset_push.{{csv,svg,mp4}}");
+            $"Artefacts: TestResults/OffsetPushPlots/offset_push.{{csv,svg,mp4}}");
     }
 
-    // ── helpers ───────────────────────────────────────────────────────────────
-
-    private static int NextPort() => Interlocked.Increment(ref _enetPortCounter);
-
-    private static int SpawnEntity(TestProcess server, byte entityType, int authority,
-        float x, float y, float z)
+    // ── MP-OFFSET-PUSH-02 ────────────────────────────────────────────────────
+    // Baseline counterpart to MP-OFFSET-PUSH-01: same geometry and same charge,
+    // but NO server-side drift injection and NO teleport. This isolates the
+    // "happy path" — when both Jolt processes simulate from identical initial
+    // conditions through the same contact dynamics, the predicted client body
+    // should track the authoritative server body without ever tripping
+    // misprediction, and end the run at essentially the same pose. If this
+    // test fails, something is wrong with the baseline predict-and-reconcile
+    // path itself (cross-process determinism, snapshot interpolation, sleep
+    // sync) — not with the teleport / drift recovery paths that the primary
+    // offset-push test exercises.
+    //
+    // Artefacts under <c>TestResults/OffsetPushPlots/offset_push_baseline.*</c>.
+    [TestCase]
+    public void MultiProcess_RigidPlayer_OffsetPushesCube_Baseline()
     {
-        using var r = server.Send(new
+        if (Orch == null) return;
+
+        var (server, client) = SpawnPair("offset_push_baseline", recordVideo: true);
+
+        server.WaitForTicks(SnapshotArmTicks);
+
+        int cubeEid = SpawnEntity(server, EntityTypeCube, authority: 0,
+            CubeOffsetX, CubeStartY, CubeStartZ);
+
+        const float TestFriction = 0.15f;
+        const float TestLinearDamp = 0.05f;
+        const float TestAngularDamp = 0.1f;
+        server.Send(new
         {
-            cmd = "spawn-entity",
-            entity_type = (int)entityType,
-            authority,
-            position = new[] { (double)x, y, z },
+            cmd = "set-entity-physics",
+            entity_id = cubeEid,
+            friction = TestFriction,
+            linearDamp = TestLinearDamp,
+            angularDamp = TestAngularDamp,
         });
-        return r.RootElement.GetProperty("data").GetProperty("entityId").GetInt32();
-    }
-
-    // Polls the client's entity list until the entity with the given id
-    // appears (or until timeoutMs expires). The client doesn't know about a
-    // server-spawned entity until the EntityEventMessage reaches it, which
-    // takes one round-trip-plus a few ticks of snapshot interpolation —
-    // calling set-entity-physics before that returns "entity not found".
-    private static void WaitForClientEntity(TestProcess client, int eid, int timeoutMs)
-    {
-        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
-        while (DateTime.UtcNow < deadline)
+        WaitForClientEntity(client, cubeEid, timeoutMs: 5_000);
+        client.Send(new
         {
-            using var doc = client.Send(new { cmd = "get-all-entities" });
-            foreach (var e in doc.RootElement.GetProperty("data").GetProperty("entities").EnumerateArray())
-            {
-                if (e.GetProperty("id").GetInt32() == eid) return;
-            }
-            Thread.Sleep(20);
-        }
-        Godot.GD.PrintErr($"[MP-OFFSET-PUSH] client entity {eid} did not appear within {timeoutMs}ms");
-    }
+            cmd = "set-entity-physics",
+            entity_id = cubeEid,
+            friction = TestFriction,
+            linearDamp = TestLinearDamp,
+            angularDamp = TestAngularDamp,
+        });
 
-    private static void WaitForClockSync(TestProcess server, TestProcess client,
-        int maxGapTicks, int timeoutMs)
-    {
-        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
-        int lastGap = int.MinValue;
-        while (DateTime.UtcNow < deadline)
+        server.WaitForTicks(CubeSettleTicks);
+
+        int playerEid = SpawnEntity(server, EntityTypeRigidPlayer, client.NetworkId,
+            0f, PlayerStartY, PlayerStartZ);
+
+        int anchorTick = client.ReadClientTick() + PlayerFallTicks;
+
+        var schedule = new List<object>
         {
-            try
-            {
-                using var sDoc = server.Send(new { cmd = "clock-state" });
-                using var cDoc = client.Send(new { cmd = "clock-state" });
-                int serverTick = sDoc.RootElement.GetProperty("data").GetProperty("serverTick").GetInt32();
-                int syncedTick = cDoc.RootElement.GetProperty("data").GetProperty("syncedTick").GetInt32();
-                int latency = cDoc.RootElement.GetProperty("data").GetProperty("averageLatencyTicks").GetInt32();
-                int gap = syncedTick - serverTick - latency;
-                lastGap = gap;
-                if (Math.Abs(gap) <= maxGapTicks) return;
-            }
-            catch { }
-            Thread.Sleep(50);
-        }
-        Godot.GD.PrintErr($"[MP-OFFSET-PUSH] clock did not converge to ±{maxGapTicks} within {timeoutMs}ms; last gap={lastGap}");
-    }
-
-    private static int ReadMispredictCount(TestProcess client)
-    {
-        using var doc = client.Send(new { cmd = "mispredict-count" });
-        return doc.RootElement.GetProperty("data").GetProperty("count").GetInt32();
-    }
-
-    private static MultiProcessMispredictTests.Sample CaptureSample(TestProcess client, int sampleTick)
-    {
-        using var doc = client.Send(new { cmd = "sample-state" });
-        var root = doc.RootElement.GetProperty("data");
-        var s = new MultiProcessMispredictTests.Sample
-        {
-            Tick = sampleTick,
-            MispredictionsCount = root.GetProperty("mispredictionsCount").GetInt32(),
-            Entities = new List<MultiProcessMispredictTests.EntityState>(),
+            new { tick = anchorTick - PlayerFallTicks,    moveX = 0.0, moveY = 0.0,  yaw = 0.0, keys = 0 },
+            new { tick = anchorTick,                      moveX = 0.0, moveY = -1.0, yaw = 0.0, keys = 0 },
+            new { tick = anchorTick + PressForwardTicks,  moveX = 0.0, moveY = 0.0,  yaw = 0.0, keys = 0 },
+            new { tick = anchorTick + RunTicks,           moveX = 0.0, moveY = 0.0,  yaw = 0.0, keys = 0 },
         };
-        foreach (var el in root.GetProperty("entities").EnumerateArray())
+        client.Send(new { cmd = "set-input-schedule", entries = schedule });
+
+        client.WaitForClientTick(anchorTick);
+        int baselineMispredicts = ReadMispredictCount(client);
+
+        var clientSamples = new List<Sample>();
+        var serverSamples = new List<Sample>();
+        for (int t = SnapshotIntervalTicks; t <= RunTicks; t += SnapshotIntervalTicks)
         {
-            var pos = el.GetProperty("position");
-            var vel = el.GetProperty("velocity");
-            var st = new MultiProcessMispredictTests.EntityState
-            {
-                Id = el.GetProperty("id").GetInt32(),
-                Type = el.GetProperty("type").GetInt32(),
-                Authority = el.GetProperty("authority").GetInt32(),
-                Position = new Vector3((float)pos[0].GetDouble(), (float)pos[1].GetDouble(), (float)pos[2].GetDouble()),
-                Velocity = new Vector3((float)vel[0].GetDouble(), (float)vel[1].GetDouble(), (float)vel[2].GetDouble()),
-            };
-            if (el.TryGetProperty("angularVelocity", out var av))
-            {
-                st.AngularVelocity = new Vector3((float)av[0].GetDouble(), (float)av[1].GetDouble(), (float)av[2].GetDouble());
-            }
-            if (el.TryGetProperty("rotation", out var rq))
-            {
-                st.Rotation = new Quaternion(
-                    (float)rq[0].GetDouble(), (float)rq[1].GetDouble(),
-                    (float)rq[2].GetDouble(), (float)rq[3].GetDouble());
-            }
-            // Visual pose — falls back to body pose when the entity has no
-            // PredictionVisualSmoothing3D wired.
-            if (el.TryGetProperty("visualPosition", out var vp))
-            {
-                st.VisualPosition = new Vector3((float)vp[0].GetDouble(), (float)vp[1].GetDouble(), (float)vp[2].GetDouble());
-            }
-            else st.VisualPosition = st.Position;
-            if (el.TryGetProperty("visualRotation", out var vr))
-            {
-                st.VisualRotation = new Quaternion(
-                    (float)vr[0].GetDouble(), (float)vr[1].GetDouble(),
-                    (float)vr[2].GetDouble(), (float)vr[3].GetDouble());
-            }
-            else st.VisualRotation = st.Rotation;
-            s.Entities.Add(st);
+            int targetTick = anchorTick + t;
+            client.WaitForClientTick(targetTick);
+            clientSamples.Add(CaptureSample(client, targetTick));
+            serverSamples.Add(CaptureSample(server, targetTick));
         }
-        return s;
+
+        int finalMispredicts = ReadMispredictCount(client);
+        int mispredictsThisRun = finalMispredicts - baselineMispredicts;
+
+        var paths = ArtifactsFor("offset_push_baseline");
+        WriteCombinedPlot(paths, clientSamples, serverSamples, playerEid, cubeEid, baselineMispredicts);
+        CopyProcessLogs(paths);
+
+        AssertThat(clientSamples.Count)
+            .OverrideFailureMessage("expected non-empty sample stream")
+            .IsGreater(0);
+
+        // Find the final pose of both replicas and assert they agree. We use the
+        // last sample because the cube has fully settled by then under the
+        // test's low friction / low damping params (settle time ~30 ticks
+        // post-release, well within RunTicks=150). At rest the SyncSleepState
+        // path anchors client to server's authoritative pose, so any residual
+        // gap here points at a real divergence (cross-process Jolt drift not
+        // being absorbed, sleep-sync gating misfiring, etc.).
+        Vector3 cubeServerEnd = Vector3.Zero;
+        Vector3 cubeClientEnd = Vector3.Zero;
+        Vector3 cubeClientVisualEnd = Vector3.Zero;
+        foreach (var e in serverSamples[serverSamples.Count - 1].Entities)
+        {
+            if (e.Id == cubeEid) { cubeServerEnd = e.Position; break; }
+        }
+        foreach (var e in clientSamples[clientSamples.Count - 1].Entities)
+        {
+            if (e.Id == cubeEid) { cubeClientEnd = e.Position; cubeClientVisualEnd = e.VisualPosition; break; }
+        }
+
+        // 5 cm body-pose agreement at end-of-run. SyncSleepState anchors the
+        // client to the server's at-rest pose every snapshot once both sides
+        // agree the body is asleep, so the residual gap should be well under
+        // SnapToRest's 1 mm idempotency tolerance plus a couple of ticks of
+        // cross-process Jolt drift around the settle window. 5 cm is loose
+        // enough to absorb the settle-tick edge case where the client sleeps
+        // a couple of ticks earlier or later than the server.
+        const float BaselineBodyToleranceM = 0.05f;
+        float bodyError = (cubeServerEnd - cubeClientEnd).Length();
+        AssertThat(bodyError)
+            .OverrideFailureMessage(
+                $"baseline: client cube body diverged from server at end of run by {bodyError:F4} m " +
+                $"(server={cubeServerEnd}, client={cubeClientEnd}). " +
+                $"Trace at TestResults/OffsetPushPlots/offset_push_baseline.{{csv,svg,mp4}}")
+            .IsLessEqual(BaselineBodyToleranceM);
+
+        // Visual smoother shouldn't be holding a meaningful offset at the end
+        // of a quiet run — by RunTicks the body has been at rest for a while
+        // and any offset captured during the push has decayed away.
+        const float BaselineVisualToleranceM = 0.05f;
+        float visualError = (cubeClientVisualEnd - cubeClientEnd).Length();
+        AssertThat(visualError)
+            .OverrideFailureMessage(
+                $"baseline: client cube visual diverged from body at end of run by {visualError:F4} m " +
+                $"(visual={cubeClientVisualEnd}, body={cubeClientEnd}). " +
+                $"Trace at TestResults/OffsetPushPlots/offset_push_baseline.{{csv,svg,mp4}}")
+            .IsLessEqual(BaselineVisualToleranceM);
+
+        // Without artificial drift or teleport, mispredictions should be rare —
+        // they can still happen during the contact / coast phase where Jolt's
+        // cross-process FP nondeterminism shows up in normals + friction. A
+        // small budget keeps the test meaningful while tolerating known
+        // cross-process noise; if a regression doubles the misprediction rate
+        // for the happy path this test catches it.
+        const int BaselineMispredictBudget = 3;
+        AssertThat(mispredictsThisRun)
+            .OverrideFailureMessage(
+                $"baseline: {mispredictsThisRun} mispredictions over {RunTicks} ticks exceeds budget {BaselineMispredictBudget}. " +
+                $"Trace at TestResults/OffsetPushPlots/offset_push_baseline.{{csv,svg,mp4}}")
+            .IsLessEqual(BaselineMispredictBudget);
+
+        Godot.GD.Print($"[MP-OFFSET-PUSH-BASELINE] run complete: {clientSamples.Count} samples, " +
+            $"{mispredictsThisRun} mispredictions, body gap {bodyError:F4} m, visual gap {visualError:F4} m. " +
+            $"Artefacts: TestResults/OffsetPushPlots/offset_push_baseline.{{csv,svg,mp4}}");
     }
 
-    private void WriteArtifacts(string label, List<MultiProcessMispredictTests.Sample> samples,
+    private static void WriteCombinedPlot(ArtifactPaths paths, List<Sample> clientSamples, List<Sample> serverSamples,
         int playerEid, int cubeEid, int baselineMispredicts)
     {
-        var dir = Path.Combine(_projectPath, ArtifactRoot);
-        var csvPath = Path.Combine(dir, label + ".csv");
-        var svgPath = Path.Combine(dir, label + ".svg");
-        OffsetPushPlot.WriteCsv(csvPath, samples, playerEid, cubeEid, baselineMispredicts);
-        OffsetPushPlot.WriteSvg(svgPath, samples, playerEid, cubeEid, baselineMispredicts, label);
-        Godot.GD.Print($"[MP-OFFSET-PUSH] wrote {csvPath}, {svgPath} ({samples.Count} samples)");
-        CopyProcessLog(dir, _serverLogPath, label + ".server.log");
-        CopyProcessLog(dir, _clientLogPath, label + ".client.log");
+        // CSV: long-form with a role column so server vs client divergence is
+        // analysable downstream.
+        using (var w = new System.IO.StreamWriter(paths.Csv))
+        {
+            w.WriteLine("tick,t_s,role,eid,etype,x,y,z,vx,vy,vz,avx,avy,avz,qx,qy,qz,qw,vis_x,vis_y,vis_z,vis_qx,vis_qy,vis_qz,vis_qw");
+            for (int i = 0; i < clientSamples.Count; i++)
+            {
+                WriteRoleRows(w, clientSamples[i], "client", playerEid, cubeEid);
+                WriteRoleRows(w, serverSamples[i], "server", playerEid, cubeEid);
+            }
+        }
+
+        // SVG plot. Four panels:
+        //   1. cube.X    — server (solid) vs client.body (dashed) vs client.visual (dotted dashed). Drift + reconcile snap visible.
+        //   2. cube.Z    — same shape.
+        //   3. cube.|d|  — magnitude of server.pos − client.pos over time (the drift gap).
+        //   4. player.Z  — server vs client (should overlap; any gap is amplified push-formula noise).
+        var plot = new SvgPlot("offset_push — server vs client cube + player traces with drift injection and reconcile snap");
+
+        var cubeXPanel  = plot.AddPanel("cube.X (m) — server (solid) vs client.body (dashed) vs client.visual (dotted)", yUnits: "m");
+        var cubeZPanel  = plot.AddPanel("cube.Z (m)", yUnits: "m");
+        var driftPanel  = plot.AddPanel("|server.cube.pos − client.cube.pos| (m) — drift accumulator", yUnits: "m");
+        var playerZPanel = plot.AddPanel("player.Z (m) — server vs client (should overlap)", yUnits: "m");
+
+        var sCubeX = new List<(int, float)>();
+        var cCubeX = new List<(int, float)>();
+        var visCubeX = new List<(int, float)>();
+        var sCubeZ = new List<(int, float)>();
+        var cCubeZ = new List<(int, float)>();
+        var drift  = new List<(int, float)>();
+        var sPlayerZ = new List<(int, float)>();
+        var cPlayerZ = new List<(int, float)>();
+
+        for (int i = 0; i < clientSamples.Count; i++)
+        {
+            int tick = clientSamples[i].Tick;
+            Vector3 sCube = Vector3.Zero, cCube = Vector3.Zero, cCubeVis = Vector3.Zero;
+            Vector3 sPlayer = Vector3.Zero, cPlayer = Vector3.Zero;
+            foreach (var e in serverSamples[i].Entities)
+            {
+                if (e.Id == cubeEid) sCube = e.Position;
+                else if (e.Id == playerEid) sPlayer = e.Position;
+            }
+            foreach (var e in clientSamples[i].Entities)
+            {
+                if (e.Id == cubeEid) { cCube = e.Position; cCubeVis = e.VisualPosition; }
+                else if (e.Id == playerEid) cPlayer = e.Position;
+            }
+            sCubeX.Add((tick, sCube.X)); cCubeX.Add((tick, cCube.X)); visCubeX.Add((tick, cCubeVis.X));
+            sCubeZ.Add((tick, sCube.Z)); cCubeZ.Add((tick, cCube.Z));
+            drift.Add((tick, (sCube - cCube).Length()));
+            sPlayerZ.Add((tick, sPlayer.Z)); cPlayerZ.Add((tick, cPlayer.Z));
+        }
+
+        cubeXPanel.AddSeries("server.cube.x", SvgPlot.Palette.Series[0], sCubeX)
+                  .AddSeries("client.cube.x", SvgPlot.Palette.Series[1], cCubeX, dashed: true)
+                  .AddSeries("client.visual.x", SvgPlot.Palette.Series[2], visCubeX, dashed: true);
+        cubeZPanel.AddSeries("server.cube.z", SvgPlot.Palette.Series[0], sCubeZ)
+                  .AddSeries("client.cube.z", SvgPlot.Palette.Series[1], cCubeZ, dashed: true);
+        driftPanel.AddSeries("|server−client|", SvgPlot.Palette.Series[3], drift);
+        playerZPanel.AddSeries("server.player.z", SvgPlot.Palette.Series[0], sPlayerZ)
+                    .AddSeries("client.player.z", SvgPlot.Palette.Series[1], cPlayerZ, dashed: true);
+
+        // Misprediction markers across all panels.
+        int prev = baselineMispredicts;
+        foreach (var s in clientSamples)
+        {
+            if (s.MispredictionsCount > prev)
+            {
+                plot.AddVerticalMarker(s.Tick, "reconcile");
+            }
+            prev = s.MispredictionsCount;
+        }
+
+        plot.Save(paths.Svg);
+        Godot.GD.Print($"[MP-OFFSET-PUSH] wrote {paths.Csv}, {paths.Svg} ({clientSamples.Count} samples)");
     }
 
-    private static void CopyProcessLog(string artifactDir, string srcPath, string targetName)
+    private static void WriteRoleRows(System.IO.StreamWriter w, Sample s, string role, int playerEid, int cubeEid)
     {
-        if (string.IsNullOrEmpty(srcPath) || !File.Exists(srcPath)) return;
-        try
+        string tickStr = s.Tick.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string tStr = (s.Tick / 60.0).ToString("F6", System.Globalization.CultureInfo.InvariantCulture);
+        foreach (var e in s.Entities)
         {
-            using var src = new FileStream(srcPath, FileMode.Open, System.IO.FileAccess.Read, FileShare.ReadWrite);
-            using var dst = new FileStream(Path.Combine(artifactDir, targetName), FileMode.Create, System.IO.FileAccess.Write, FileShare.Read);
-            src.CopyTo(dst);
+            if (e.Id != playerEid && e.Id != cubeEid) continue;
+            w.Write(tickStr); w.Write(','); w.Write(tStr); w.Write(','); w.Write(role); w.Write(',');
+            w.Write(e.Id); w.Write(','); w.Write(e.Type); w.Write(',');
+            w.Write(CsvWriter.F(e.Position.X)); w.Write(','); w.Write(CsvWriter.F(e.Position.Y)); w.Write(','); w.Write(CsvWriter.F(e.Position.Z)); w.Write(',');
+            w.Write(CsvWriter.F(e.Velocity.X)); w.Write(','); w.Write(CsvWriter.F(e.Velocity.Y)); w.Write(','); w.Write(CsvWriter.F(e.Velocity.Z)); w.Write(',');
+            w.Write(CsvWriter.F(e.AngularVelocity.X)); w.Write(','); w.Write(CsvWriter.F(e.AngularVelocity.Y)); w.Write(','); w.Write(CsvWriter.F(e.AngularVelocity.Z)); w.Write(',');
+            w.Write(CsvWriter.F(e.Rotation.X)); w.Write(','); w.Write(CsvWriter.F(e.Rotation.Y)); w.Write(','); w.Write(CsvWriter.F(e.Rotation.Z)); w.Write(','); w.Write(CsvWriter.F(e.Rotation.W)); w.Write(',');
+            w.Write(CsvWriter.F(e.VisualPosition.X)); w.Write(','); w.Write(CsvWriter.F(e.VisualPosition.Y)); w.Write(','); w.Write(CsvWriter.F(e.VisualPosition.Z)); w.Write(',');
+            w.Write(CsvWriter.F(e.VisualRotation.X)); w.Write(','); w.Write(CsvWriter.F(e.VisualRotation.Y)); w.Write(','); w.Write(CsvWriter.F(e.VisualRotation.Z)); w.Write(','); w.Write(CsvWriter.F(e.VisualRotation.W)); w.Write('\n');
         }
-        catch (Exception ex)
-        {
-            Godot.GD.PrintErr($"[MP-OFFSET-PUSH] failed to copy {srcPath}: {ex.Message}");
-        }
-    }
-
-    private static string ResolveProjectPath()
-    {
-        var dir = new DirectoryInfo(System.Environment.CurrentDirectory);
-        while (dir != null)
-        {
-            if (File.Exists(Path.Combine(dir.FullName, "project.godot"))) return dir.FullName;
-            dir = dir.Parent;
-        }
-        throw new InvalidOperationException("Could not locate project.godot from current working directory");
     }
 }

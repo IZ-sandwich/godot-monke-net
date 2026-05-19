@@ -129,7 +129,7 @@ public class EntitySyncTests
         _clientNet.PacketReceived += (_, bin) => sent.Add(bin);
 
         // Deliver a fake EntityRequestMessage from the client so the server spawns an entity
-        var req = new EntityRequestMessage { EntityType = 0 };
+        var req = new EntityRequestMessage { EntityType = 1 };
         _serverNet.SimulateIncomingPacket(2, MessageSerializer.Serialize(req));
         await _serverRunner.AwaitIdleFrame();
 
@@ -156,7 +156,7 @@ public class EntitySyncTests
         {
             Event = EntityEventEnum.Created,
             EntityId = 99,
-            EntityType = 0,
+            EntityType = 1,
             Authority = _client.GetNetworkId(),
             Position = Godot.Vector3.Zero,
             Yaw = 0f,
@@ -182,7 +182,7 @@ public class EntitySyncTests
         {
             Event = EntityEventEnum.Created,
             EntityId = 88,
-            EntityType = 0,
+            EntityType = 1,
             Authority = _client.GetNetworkId(),
             Position = Godot.Vector3.Zero,
             Yaw = 0f,
@@ -198,7 +198,7 @@ public class EntitySyncTests
         {
             Event = EntityEventEnum.Destroyed,
             EntityId = 88,
-            EntityType = 0,
+            EntityType = 1,
             Authority = 0,
             Metadata = ""
         };
@@ -216,7 +216,7 @@ public class EntitySyncTests
     public async Task Server_NewClientConnects_ReceivesWorldState()
     {
         // Spawn an entity owned by peer 2 first so there is world state to sync
-        var spawnReq = new EntityRequestMessage { EntityType = 0 };
+        var spawnReq = new EntityRequestMessage { EntityType = 1 };
         _serverNet.SimulateIncomingPacket(2, MessageSerializer.Serialize(spawnReq));
         await _serverRunner.AwaitIdleFrame();
 
@@ -275,37 +275,9 @@ public class EntitySyncTests
         AssertThat(snapshots[0].Tick).IsEqual(Tick);
     }
 
-    // G-06 ─────────────────────────────────────────────────────────────────────
-    [TestCase]
-    public void Interpolator_RejectsOutOfOrderSnapshot()
-    {
-        var interpolator = _client.GetNode<ClientSnapshotInterpolator>("SnapshotInterpolator");
-        var bufferField = typeof(ClientSnapshotInterpolator)
-            .GetField("_snapshotBuffer", BindingFlags.NonPublic | BindingFlags.Instance);
-
-        // Clear any state accumulated during the BeforeTest setup so the assertion
-        // reflects only the snapshots we deliver in this test
-        var buffer = (IList)bufferField!.GetValue(interpolator);
-        buffer.Clear();
-
-        var snaps = new[]
-        {
-            new GameSnapshotMessage { Tick = 10, States = System.Array.Empty<IEntityStateData>() },
-            new GameSnapshotMessage { Tick = 15, States = System.Array.Empty<IEntityStateData>() },
-            new GameSnapshotMessage { Tick = 12, States = System.Array.Empty<IEntityStateData>() }, // out of order
-        };
-
-        // SimulateIncomingPacket is synchronous — no AwaitIdleFrame needed, which
-        // would let _Process prune the buffer before we read it
-        foreach (var snap in snaps)
-            _clientNet.SimulateIncomingPacket(1, MessageSerializer.Serialize(snap));
-
-        var actualTicks = buffer.Cast<GameSnapshotMessage>().Select(s => s.Tick).ToList();
-        AssertThat(buffer.Count).IsEqual(2);
-        AssertThat(actualTicks.Contains(10)).IsTrue();
-        AssertThat(actualTicks.Contains(15)).IsTrue();
-        AssertThat(actualTicks.Contains(12)).IsFalse();
-    }
+    // G-06 deleted with the ClientSnapshotInterpolator removal — out-of-order
+    // snapshots are now handled by ClientPredictionManager's per-tick matching
+    // (older ticks are pruned in ProcessServerState's _predictedStates loop).
 
     // G-07 ─────────────────────────────────────────────────────────────────────
     [TestCase]

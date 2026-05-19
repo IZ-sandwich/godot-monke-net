@@ -56,6 +56,18 @@ public partial class MultiClientHarness : Node
     private string _desiredWindowTitle;
     private HarnessVideoRecorder _videoRecorder;
 
+    // Runtime-spawned static collider ramps. Per-process; each side independently
+    // creates its own StaticBody3D via the spawn-ramp orch command and stores it
+    // here for lifetime tracking. See SpawnRamp.
+    private readonly List<Node3D> _spawnedRamps = new();
+
+    // Retained client connection params so reconnect-client can re-establish using the
+    // SAME server address / ENet port the harness was launched with. Without this the
+    // disconnect-client → reconnect-client flow couldn't be driven entirely via the
+    // orch protocol (the orchestrator would have to remember the spawn args).
+    private string _clientServerAddr;
+    private int _clientEnetPort;
+
     public override void _Ready()
     {
         var args = ParseArgs(OS.GetCmdlineUserArgs());
@@ -102,6 +114,8 @@ public partial class MultiClientHarness : Node
         else if (_role == "client")
         {
             string addr = args.GetValueOrDefault("server-addr", "127.0.0.1");
+            _clientServerAddr = addr;
+            _clientEnetPort = enetPort;
             MonkeNetManager.Instance.CreateClient(addr, enetPort);
             GD.Print($"[harness {_label}] enet client connecting to {addr}:{enetPort}");
             InstallObserverCamera();
@@ -317,7 +331,10 @@ public partial class MultiClientHarness : Node
                 }),
                 "spawn-ball" => SpawnBall(doc.RootElement),
                 "spawn-entity" => SpawnEntity(doc.RootElement),
+                "spawn-ramp" => SpawnRamp(doc.RootElement),
                 "teleport-entity" => TeleportEntity(doc.RootElement),
+                "apply-impulse" => ApplyImpulse(doc.RootElement),
+                "force-reconcile" => ForceReconcile(doc.RootElement),
                 "set-entity-physics" => SetEntityPhysics(doc.RootElement),
                 "set-authority" => SetAuthority(doc.RootElement),
                 "send-input" => SendInput(doc.RootElement),
@@ -327,7 +344,13 @@ public partial class MultiClientHarness : Node
                 "get-all-entities" => GetAllEntities(),
                 "get-entity" => GetEntity(doc.RootElement),
                 "mispredict-count" => MispredictCount(),
+                "server-peer-count" => ServerPeerCount(),
+                "pending-reclaim-for" => PendingReclaimFor(doc.RootElement),
                 "sample-state" => SampleState(),
+                "disconnect-client" => DisconnectClient(),
+                "reconnect-client" => ReconnectClient(),
+                "client-persistent-id" => ClientPersistentId(),
+                "clear-input-schedule" => ClearInputSchedule(),
                 "shutdown" => Shutdown(),
                 _ => Err($"unknown cmd '{cmd}'"),
             };
@@ -413,6 +436,63 @@ public partial class MultiClientHarness : Node
         return Ok(new { entityId = lastEntity.EntityId });
     }
 
+    // Static-collider ramp injected at runtime, used by the multi-process ramp
+    // motion tests to parameterise slope angle per scenario. Runs on BOTH server
+    // and clients (each side adds its own StaticBody3D to its local World3D);
+    // physics collisions resolve identically across processes because the ramp
+    // is static (no integration, no per-process drift).
+    //
+    // Rotation is around the world X axis: positive angleDeg tilts the local +Z
+    // end DOWN (toward -Y) and the local -Z end UP (toward +Y). A player walking
+    // in the -Z direction with angleDeg > 0 walks UPHILL; the same player with
+    // angleDeg < 0 walks DOWNHILL.
+    //
+    // Request fields:
+    //   position:  [x,y,z]   world center of the ramp slab
+    //   angleDeg:  float     tilt around the world X axis
+    //   length:    float     long dimension along local Z (default 8.0)
+    //   width:     float     width along local X (default 4.0)
+    //   thickness: float     short dimension along local Y (default 0.5)
+    //
+    // The client side also adds a BoxMesh so the recorded video shows the
+    // ramp geometry; the headless server skips the mesh.
+    private string SpawnRamp(JsonElement req)
+    {
+        var pos = ReadVec3(req.GetProperty("position"));
+        float angleDeg = (float)req.GetProperty("angleDeg").GetDouble();
+        float length = req.TryGetProperty("length", out var lp) ? (float)lp.GetDouble() : 8f;
+        float width = req.TryGetProperty("width", out var wp) ? (float)wp.GetDouble() : 4f;
+        float thickness = req.TryGetProperty("thickness", out var tp) ? (float)tp.GetDouble() : 0.5f;
+
+        var body = new StaticBody3D { Name = $"HarnessRamp_{_spawnedRamps.Count}" };
+        var size = new Vector3(width, thickness, length);
+        var shape = new CollisionShape3D { Shape = new BoxShape3D { Size = size } };
+        body.AddChild(shape);
+        if (_role == "client")
+        {
+            var mesh = new MeshInstance3D
+            {
+                Mesh = new BoxMesh { Size = size },
+                MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.6f, 0.6f, 0.7f) },
+            };
+            body.AddChild(mesh);
+        }
+        AddChild(body);
+        // Setting GlobalPosition/RotationDegrees after AddChild because Godot
+        // requires the node to be in the tree before global transforms apply.
+        body.GlobalPosition = pos;
+        body.RotationDegrees = new Vector3(angleDeg, 0, 0);
+        _spawnedRamps.Add(body);
+        return Ok(new
+        {
+            rampIndex = _spawnedRamps.Count - 1,
+            role = _role,
+            position = SerializeVec3(pos),
+            angleDeg,
+            length, width, thickness,
+        });
+    }
+
     // Forcibly relocates a server-owned entity's body to a new world position.
     // Used by tests that need to deterministically trigger a large client-side
     // reconcile (the next snapshot from the server arrives with the new pose,
@@ -424,6 +504,13 @@ public partial class MultiClientHarness : Node
         if (_role != "server") return Err("teleport-entity is server-only");
         int eid = req.GetProperty("entity_id").GetInt32();
         var pos = ReadVec3(req.GetProperty("position"));
+        // Optional yaw (radians, world-Y rotation). When present, the entity is
+        // rotated to that yaw in addition to being teleported. Used by tests
+        // that need to place a long body at a specific orientation before any
+        // input is driven (e.g. vehicle lying sideways at an angle to the
+        // player's approach path).
+        bool hasYaw = req.TryGetProperty("yaw", out var yawProp);
+        float yaw = hasYaw ? (float)yawProp.GetDouble() : 0f;
         NetworkBehaviour target = null;
         foreach (var e in EntitySpawner.Instance.Entities)
         {
@@ -435,6 +522,12 @@ public partial class MultiClientHarness : Node
         if (root is RigidBody3D rb)
         {
             rb.GlobalPosition = pos;
+            if (hasYaw)
+            {
+                var rot = rb.Rotation;
+                rot.Y = yaw;
+                rb.Rotation = rot;
+            }
             rb.LinearVelocity = Vector3.Zero;
             rb.AngularVelocity = Vector3.Zero;
             rb.ResetPhysicsInterpolation();
@@ -442,8 +535,124 @@ public partial class MultiClientHarness : Node
         else
         {
             root.GlobalPosition = pos;
+            if (hasYaw)
+            {
+                var rot = root.Rotation;
+                rot.Y = yaw;
+                root.Rotation = rot;
+            }
         }
-        return Ok(new { entityId = eid, teleportedTo = SerializeVec3(pos) });
+        return Ok(new { entityId = eid, teleportedTo = SerializeVec3(pos), yaw });
+    }
+
+    // Inject an out-of-band velocity delta into a body's RigidBody3D. Modelled
+    // on the cross-process Jolt drift used by MultiProcessPushDriftToleranceTests —
+    // the orchestrator adds a small per-tick velocity perturbation to the
+    // server-side replica of a body so the test can observe whether the push
+    // formula on the client compensates correctly.
+    //
+    // Accepts:
+    //   deltaLinearVelocity:  [x, y, z]  — required when no angular delta given
+    //   deltaAngularVelocity: [x, y, z]  — optional
+    //   targetRole:           "server" | "client" — optional; defaults to whichever
+    //                         role received the command. Required when a single
+    //                         orchestrator wants to perturb only one side of a pair.
+    // The command short-circuits with ok=false when targetRole is set and does
+    // not match _role, so the caller can fire-and-forget at both processes and
+    // only one applies.
+    private string ApplyImpulse(JsonElement req)
+    {
+        if (req.TryGetProperty("targetRole", out var tr))
+        {
+            string want = tr.GetString();
+            if (!string.IsNullOrEmpty(want) && want != _role)
+                return Ok(new { entityId = (int?)null, skipped = true, role = _role });
+        }
+        int eid = req.GetProperty("entity_id").GetInt32();
+        IEnumerable<NetworkBehaviour> collection =
+            _role == "server" ? (IEnumerable<NetworkBehaviour>)EntitySpawner.Instance.Entities
+                              : EntitySpawner.Instance.ClientEntities;
+        NetworkBehaviour target = null;
+        foreach (var e in collection)
+        {
+            if (e.EntityId == eid) { target = e; break; }
+        }
+        if (target == null) return Err($"entity {eid} not found on {_role}");
+        var root = EntitySpawner.Instance.GetEntityRoot(target);
+        if (root is not RigidBody3D rb) return Err($"entity {eid} root is not a RigidBody3D");
+
+        if (req.TryGetProperty("deltaLinearVelocity", out var dlv))
+        {
+            rb.LinearVelocity += ReadVec3(dlv);
+        }
+        if (req.TryGetProperty("deltaAngularVelocity", out var dav))
+        {
+            rb.AngularVelocity += ReadVec3(dav);
+        }
+        return Ok(new
+        {
+            entityId = eid,
+            role = _role,
+            linearVelocity = SerializeVec3(rb.LinearVelocity),
+            angularVelocity = SerializeVec3(rb.AngularVelocity),
+        });
+    }
+
+    // Out-of-band write of the authoritative pose on the server side, designed
+    // to deliberately trip the client's HasMisspredicted path so reconcile-replay
+    // logic gets exercised in a cross-process test. Distinct from teleport-entity
+    // in two ways: (1) does NOT auto-zero velocity (so a moving body can be
+    // nudged), and (2) reports the server tick the change took effect on so the
+    // test can correlate with the client's mispredict-count.
+    private string ForceReconcile(JsonElement req)
+    {
+        if (_role != "server") return Err("force-reconcile is server-only");
+        int eid = req.GetProperty("entity_id").GetInt32();
+        NetworkBehaviour target = null;
+        foreach (var e in EntitySpawner.Instance.Entities)
+        {
+            if (e.EntityId == eid) { target = e; break; }
+        }
+        if (target == null) return Err($"entity {eid} not found");
+        var root = EntitySpawner.Instance.GetEntityRoot(target);
+        if (root == null) return Err($"entity {eid} has no root node");
+
+        var pos = ReadVec3(req.GetProperty("position"));
+        if (root is RigidBody3D rb)
+        {
+            rb.GlobalPosition = pos;
+            if (req.TryGetProperty("rotation", out var rotProp))
+            {
+                var q = new Quaternion(
+                    (float)rotProp[0].GetDouble(), (float)rotProp[1].GetDouble(),
+                    (float)rotProp[2].GetDouble(), (float)rotProp[3].GetDouble());
+                rb.GlobalTransform = new Transform3D(new Basis(q), rb.GlobalPosition);
+            }
+            if (req.TryGetProperty("linearVelocity", out var lv))
+                rb.LinearVelocity = ReadVec3(lv);
+            if (req.TryGetProperty("angularVelocity", out var av))
+                rb.AngularVelocity = ReadVec3(av);
+            rb.ResetPhysicsInterpolation();
+        }
+        else
+        {
+            root.GlobalPosition = pos;
+            if (req.TryGetProperty("rotation", out var rotProp))
+            {
+                var q = new Quaternion(
+                    (float)rotProp[0].GetDouble(), (float)rotProp[1].GetDouble(),
+                    (float)rotProp[2].GetDouble(), (float)rotProp[3].GetDouble());
+                root.GlobalTransform = new Transform3D(new Basis(q), root.GlobalPosition);
+            }
+        }
+
+        var clock = ServerManager.Instance?.GetNodeOrNull<ServerNetworkClock>("ServerNetworkClock");
+        return Ok(new
+        {
+            entityId = eid,
+            position = SerializeVec3(pos),
+            atServerTick = clock?.CurrentTick ?? 0,
+        });
     }
 
     // Runtime override of a body's friction + damping. Demo-cube physics tuning
@@ -563,8 +772,13 @@ public partial class MultiClientHarness : Node
             if (_schedule.Count == 0) return NextInput;
 
             // Resolve the clock lazily — ClientManager.Instance isn't
-            // available during this node's _Ready (autoload ordering).
-            if (_clock == null && ClientManager.Instance != null)
+            // available during this node's _Ready (autoload ordering). Also
+            // re-resolve if the previously cached clock node has been freed,
+            // which happens across a disconnect-client → reconnect-client
+            // cycle: MonkeNetManager.CreateClient drops the old ClientManager
+            // (and with it the old ClientNetworkClock) before instantiating
+            // a fresh one, so the cached reference would otherwise dangle.
+            if ((_clock == null || !IsInstanceValid(_clock)) && ClientManager.Instance != null)
                 _clock = ClientManager.Instance.GetNodeOrNull<ClientNetworkClock>("ClientNetworkClock");
             if (_clock == null) return NextInput;
 
@@ -654,13 +868,22 @@ public partial class MultiClientHarness : Node
 
     private void EnsureInputProducer()
     {
-        if (_inputProducer != null) return;
-        _inputProducer = new HarnessInputProducer();
-        // Add to the tree so _Ready / lifecycle hooks fire normally; parent under the
-        // harness node itself (which is in MainScene). InputProducerComponent's
-        // lifecycle wires it into MonkeNetConfig on AddChild, but we still assign
-        // directly to guarantee replacement if a LocalPlayer producer is also active.
-        AddChild(_inputProducer);
+        if (_inputProducer == null)
+        {
+            _inputProducer = new HarnessInputProducer();
+            // Add to the tree so _Ready / lifecycle hooks fire normally; parent under the
+            // harness node itself (which is in MainScene). InputProducerComponent's
+            // lifecycle wires it into MonkeNetConfig on AddChild, but we still assign
+            // directly to guarantee replacement if a LocalPlayer producer is also active.
+            AddChild(_inputProducer);
+        }
+        // Re-assert ownership of MonkeNetConfig.Instance.InputProducer every call.
+        // Across a disconnect-client → reconnect-client cycle, the reclaimed player
+        // entity spawns a fresh PlayerInputProducer (via the LocalRigidPlayer scene)
+        // which calls Current=true in its _Ready and steals the InputProducer slot.
+        // Test code re-invoking set-input-schedule after reconnect expects the
+        // harness producer to be active again; idempotently re-pointing is the
+        // cheapest way to guarantee that without coupling to spawn timing.
         MonkeNetConfig.Instance.InputProducer = _inputProducer;
     }
 
@@ -674,6 +897,118 @@ public partial class MultiClientHarness : Node
         if (cm == null) return Ok(new { count = 0 });
         var pm = FindChildOfType<ClientPredictionManager>(cm);
         return Ok(new { count = pm?.MispredictionsCount ?? 0 });
+    }
+
+    // Voluntary client disconnect via the same code path the demo's
+    // "Disconnect" button uses (ClientManager.Disconnect). Sends
+    // DisconnectNotificationMessage so the server treats this as a manual
+    // disconnect (ManualDisconnectMode = KeepEntity by default) and parks the
+    // client's entities in a reclaim entry keyed by the client's
+    // ClientPersistentIdentity rather than destroying them.
+    //
+    // The ClientManager + ClientEntityManager survive this call — only the
+    // ENet peer is torn down — so the persistent client identity (cached in
+    // ClientPersistentIdentity, plus the "IsAwaitingReconnect" flag) carries
+    // through to the next reconnect-client. The schedule installed via
+    // set-input-schedule references the OLD clock's ticks so we also clear
+    // it: the new ClientNetworkClock resets from zero on reconnect and the
+    // orchestrator is expected to install a fresh schedule anchored to the
+    // new client tick.
+    private string DisconnectClient()
+    {
+        if (_role != "client") return Err("disconnect-client is client-only");
+        var cm = ClientManager.Instance;
+        if (cm == null) return Err("disconnect-client: no ClientManager");
+        if (_inputProducer != null) _inputProducer.ReplaceSchedule(new List<(int, IPackableElement)>());
+        cm.Disconnect();
+        return Ok(new { disconnected = true });
+    }
+
+    // Counterpart to disconnect-client: re-establishes the ENet connection to
+    // the same server address + port the harness was launched with. Uses
+    // MonkeNetManager.CreateClient, which removes the old ClientManager and
+    // brings up a fresh one — ClientEntityManager.OnNetworkReady then sends
+    // ClientHelloMessage carrying our ClientPersistentIdentity, and the
+    // server's ServerConnectionMonitor performs the keyed-by-persistent-id
+    // reclaim lookup that reassigns each previously-orphaned entity's
+    // Authority back to this peer.
+    //
+    // Returns immediately after kicking off the connect; callers should poll
+    // the "ready" cmd with networkReady=true to wait for the new ENet peer to
+    // come up + the clock to converge before driving more inputs.
+    private string ReconnectClient()
+    {
+        if (_role != "client") return Err("reconnect-client is client-only");
+        if (string.IsNullOrEmpty(_clientServerAddr) || _clientEnetPort == 0)
+            return Err("reconnect-client: original server-addr/enet-port not captured at startup");
+        MonkeNetManager.Instance.CreateClient(_clientServerAddr, _clientEnetPort);
+        return Ok(new { reconnecting = true, serverAddr = _clientServerAddr, enetPort = _clientEnetPort });
+    }
+
+    // Reports the persistent client identity (the value sent in every
+    // ClientHelloMessage on every connect, source-of-truth for reclaim
+    // server-side) and whether we're in the post-disconnect /
+    // pre-next-reconnect window. The persistent id NEVER rotates within a
+    // process; reading this both before and after a reconnect should
+    // return the same value, which is precisely what the persistence test
+    // asserts. The 4-char suffix matches ServerConnectionMonitor's
+    // [cid:XXXX] log tag so the test trace can be cross-referenced
+    // against per-process MonkeLogger files.
+    private string ClientPersistentId()
+    {
+        if (_role != "client") return Err("client-persistent-id is client-only");
+        string id = ClientPersistentIdentity.Get();
+        return Ok(new
+        {
+            id,
+            idShort = ClientPersistentIdentity.Tail(id),
+            source = ClientPersistentIdentity.SourceDescription,
+            isAwaitingReconnect = ClientEntityManager.IsAwaitingReconnect,
+        });
+    }
+
+    // Drops the active input schedule without sending a new one. Used by
+    // tests across the disconnect/reconnect boundary so a stale schedule
+    // (keyed to the previous ClientNetworkClock's ticks) isn't lingering
+    // when the post-reconnect schedule is installed. set-input-schedule
+    // already replaces the previous schedule, so this is only needed if the
+    // caller wants a beat of zero-input between phases.
+    private string ClearInputSchedule()
+    {
+        if (_role != "client") return Err("clear-input-schedule is client-only");
+        if (_inputProducer != null)
+            _inputProducer.ReplaceSchedule(new List<(int, IPackableElement)>());
+        return Ok(new { cleared = true });
+    }
+
+    // Reports whether the server is holding a parked reclaim entry for the
+    // given ClientPersistentId (i.e. that identity disconnected with
+    // KeepEntity and hasn't reconnected yet). Used by the persistence test
+    // to assert both that an entry exists immediately after disconnect AND
+    // that it's been consumed once the matching client reconnects + sends
+    // its hello.
+    private string PendingReclaimFor(JsonElement req)
+    {
+        if (_role != "server") return Err("pending-reclaim-for is server-only");
+        var sm = ServerManager.Instance;
+        if (sm == null) return Err("pending-reclaim-for: no ServerManager");
+        // ServerConnectionMonitor sits as a named child of ServerManager (see
+        // ServerManager.tscn). Type-search would also work; this is a
+        // diagnostic command so the simple name-based lookup is fine.
+        var monitor = sm.GetNodeOrNull<ServerConnectionMonitor>("ServerConnectionMonitor");
+        if (monitor == null) return Err("pending-reclaim-for: ServerConnectionMonitor not in scene");
+        string id = req.GetProperty("client_id").GetString() ?? "";
+        return Ok(new { hasPending = monitor.HasPendingReclaimFor(id), clientId = id });
+    }
+
+    // Number of currently-connected client peers, as tracked by ServerManager's
+    // INetworkManager. Used by MultiProcessServerLifecycleTests to verify
+    // stop/restart leaves no stale peer state.
+    private string ServerPeerCount()
+    {
+        if (_role != "server") return Err("server-peer-count is server-only");
+        var sm = ServerManager.Instance;
+        return Ok(new { count = sm?.GetConnectedClientCount() ?? 0 });
     }
 
     // One-shot snapshot of the tick + every visible entity's position/velocity. Cheap
@@ -720,6 +1055,10 @@ public partial class MultiClientHarness : Node
                         visualRot = smoother.Visual.GlobalTransform.Basis.GetRotationQuaternion();
                     }
                 }
+                // Sleep state — only meaningful on RigidBody3D. Other body
+                // types report false / false so the JSON shape stays uniform.
+                bool sleeping = (root is RigidBody3D rbSleep) && rbSleep.Sleeping;
+                bool canSleep = (root is RigidBody3D rbCanSleep) && rbCanSleep.CanSleep;
                 list.Add(new
                 {
                     id = e.EntityId,
@@ -731,6 +1070,8 @@ public partial class MultiClientHarness : Node
                     rotation = new double[] { rot.X, rot.Y, rot.Z, rot.W },
                     visualPosition = SerializeVec3(visualPos),
                     visualRotation = new double[] { visualRot.X, visualRot.Y, visualRot.Z, visualRot.W },
+                    sleeping,
+                    canSleep,
                 });
             }
         }

@@ -8,11 +8,20 @@
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_srplyr"]
 
+; Must match LocalRigidPlayer's friction (0.3). The two scenes simulate the
+; same player on each side of the network; any friction mismatch produces
+; systematic horizontal-velocity divergence on landing that immediately trips
+; the misprediction threshold. See LocalRigidPlayer.tscn for the rationale.
+[sub_resource type="PhysicsMaterial" id="PhysicsMaterial_srplyr"]
+friction = 0.3
+bounce = 0.0
+
 [node name="ServerRigidPlayer" type="RigidBody3D" unique_id=1602080720]
 collision_layer = 32768
 collision_mask = 32769
 mass = 1.0
 lock_rotation = true
+physics_material_override = SubResource("PhysicsMaterial_srplyr")
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=1602080721]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)

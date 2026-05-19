@@ -1,6 +1,6 @@
-[gd_scene format=3 uid="uid://66l4uc615yvc"]
+[gd_scene format=3 uid="uid://ccm0ld0spuuee"]
 
-[ext_resource type="Script" uid="uid://b1dfsjagwdd6e" path="res://demo/players/rigid_player/DummyRigidPlayerStateInterpolation.cs" id="1_drpi"]
+[ext_resource type="Script" path="res://demo/players/rigid_player/DummyRigidPlayerStateInterpolation.cs" id="1_drpi"]
 
 [sub_resource type="CapsuleMesh" id="CapsuleMesh_drplyr"]
 

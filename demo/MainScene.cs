@@ -26,24 +26,11 @@ public partial class MainScene : Node3D
     // to repro misprediction scenarios without relying on the F-key proximity flow.
     [Export] private bool _requireProximityForVehicleClaim = true;
 
-    // When true (default), claiming a vehicle teleports the player on top of it each
-    // tick (rider mode). When false, claiming gives ownership but the player keeps its
-    // own position — the vehicle still becomes the input target (player ignores WASD
-    // while owning a vehicle), but no on-vehicle anchor. Lets you test pure vehicle
-    // control without the player-on-top collision artifact.
-    [Export] private bool _autoRideOnClaim = true;
-
-    // Static mirror of _autoRideOnClaim for the player tick handlers (LocalPlayerPrediction
-    // on the client, PlayerStateSyncronizer on the server) to consult without a NodePath
-    // back to MainScene. Kept in sync with the [Export] in _Ready.
-    public static bool AutoRideOnClaim { get; private set; } = true;
-
     // clientId → vehicleEntityId currently being driven. Populated when an authority
     // request is approved; cleared on ReleaseVehicleMessage or disconnect.
     private readonly Dictionary<int, int> _ridingByPlayer = new();
 
     private Label _connectingLabel;
-    private Button _spawnButton;
     private Button _spawnBallButton;
     private Button _spawnVehicleButton;
     private Button _spawnRigidPlayerButton;
@@ -72,10 +59,7 @@ public partial class MainScene : Node3D
 
     public override void _Ready()
     {
-        AutoRideOnClaim = _autoRideOnClaim;
-
         _connectingLabel = GetNode<Label>("Menu/ConnectingLabel");
-        _spawnButton = GetNode<Button>("Menu/SpawnButton");
         _spawnBallButton = GetNode<Button>("Menu/SpawnBallButton");
         _spawnVehicleButton = GetNode<Button>("Menu/SpawnVehicleButton");
         _spawnRigidPlayerButton = GetNode<Button>("Menu/SpawnRigidPlayerButton");
@@ -88,15 +72,17 @@ public partial class MainScene : Node3D
         _stopServerButton = GetNode<Button>("Menu/StopServerButton");
         _stopServerButton.Hide();
 
-        // ReconnectButton appears only when ClientEntityManager has a saved reclaim token
-        // from a prior session — typical entry path is a timeout disconnect, after which
-        // OnConnectionLost reloads this scene with the static token preserved.
+        // ReconnectButton appears only after we've observed a disconnect from a prior
+        // session in this process — typical entry path is a timeout disconnect, after
+        // which OnConnectionLost reloads this scene with the static "awaiting reconnect"
+        // flag preserved. The persistent client identity itself is always available
+        // (ClientPersistentIdentity.Get() resolves from CLI / user:// on first use), so
+        // gating the button purely on that would show Reconnect even on a fresh boot.
         _reconnectButton = GetNode<Button>("Menu/ReconnectButton");
-        _reconnectButton.Visible = ClientEntityManager.HasSavedReclaimToken;
+        _reconnectButton.Visible = ClientEntityManager.IsAwaitingReconnect;
 
         // Spawn buttons are useless until a client is connected and ready.
         // OnNetworkReady reveals them; OnConnectionLost / OnConnectionFailed re-hides.
-        _spawnButton.Hide();
         _spawnBallButton.Hide();
         _spawnVehicleButton.Hide();
         _spawnRigidPlayerButton.Hide();
@@ -158,11 +144,10 @@ public partial class MainScene : Node3D
             return false;
         }
 
-        // Both player variants are eligible to drive: EntityType 0 = regular CharacterBody3D
-        // player, 3 = rigid-body player. Filtering only by 0 used to silently reject every
-        // claim from a rigid-player client because no matching entity existed.
+        // EntityType 3 = rigid-body player (the only player type after the CharacterPlayer
+        // demo was removed).
         var player = EntitySpawner.Instance.Entities
-            .FirstOrDefault(e => (e.EntityType == 0 || e.EntityType == 3) && e.Authority == requesterId);
+            .FirstOrDefault(e => e.EntityType == 3 && e.Authority == requesterId);
         if (player == null)
         {
             MonkeLogger.Warn($"VehicleClaim rejected (client {requesterId}, entity {entityId}): no player entity for client");
@@ -193,15 +178,13 @@ public partial class MainScene : Node3D
 
     private void OnServerCommandReceived(int clientId, IPackableMessage command)
     {
-        if (command is ReleaseVehicleMessage release)
-        {
-            var entity = EntitySpawner.Instance.Entities.Find(e => e.EntityId == release.EntityId);
-            if (entity == null || entity.Authority != clientId) return;
-
-            ServerManager.Instance.ChangeAuthority(release.EntityId, 0);
-            _ridingByPlayer.Remove(clientId);
-            return;
-        }
+        // ReleaseAuthorityMessage is now handled by the framework
+        // (ServerEntityManager.HandleReleaseRequest). The demo's _ridingByPlayer cache
+        // is reconciled via OnServerClientDisconnected — it's only used to reclaim a
+        // vehicle when its driver disconnects, so a stale entry that's been released
+        // through the framework path is harmless (its EntityId still maps to a vehicle
+        // currently owned by 0, which the disconnect-handler's `entity.Authority == clientId`
+        // check filters out).
 
         if (command is SpawnVehicleRequestMessage)
         {
@@ -242,13 +225,6 @@ public partial class MainScene : Node3D
             ServerManager.Instance.ChangeAuthority(vehicleId, 0);
     }
 
-
-    private void OnSpawnButtonPressed()
-    {
-        if (ClientManager.Instance == null) return;
-        ClientManager.Instance.MakeEntityRequest(0);
-        _spawnButton.Hide();
-    }
 
     private void OnSpawnBallButtonPressed()
     {
@@ -412,7 +388,6 @@ public partial class MainScene : Node3D
         _cancelButton.Hide();
         _disconnectButton.Show();
         _simulateTimeoutButton.Show();
-        _spawnButton.Show();
         _spawnBallButton.Show();
         _spawnVehicleButton.Show();
         _spawnRigidPlayerButton.Show();
@@ -425,7 +400,6 @@ public partial class MainScene : Node3D
         _disconnectButton.Hide();
         _simulateTimeoutButton.Hide();
         _cancelButton.Hide();
-        _spawnButton.Hide();
         _spawnBallButton.Hide();
         _spawnVehicleButton.Hide();
         _spawnRigidPlayerButton.Hide();
@@ -441,7 +415,6 @@ public partial class MainScene : Node3D
     private void OnConnectionFailed()
     {
         _cancelButton.Hide();
-        _spawnButton.Hide();
         _spawnBallButton.Hide();
         _spawnVehicleButton.Hide();
         _spawnRigidPlayerButton.Hide();

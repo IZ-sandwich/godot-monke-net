@@ -3,71 +3,55 @@
 [ext_resource type="Script" uid="uid://b26awixuhuq6l" path="res://demo/MainScene.cs" id="1_a3xwa"]
 [ext_resource type="Material" uid="uid://bqguau4l77phy" path="res://demo/map/Obstacles1.tres" id="2_kwgue"]
 [ext_resource type="Script" uid="uid://dnkbivw2aixxo" path="res://addons/monke-net/src/Shared/Nodes/MonkeNetConfig.cs" id="2_rf2cd"]
-[ext_resource type="PackedScene" uid="uid://b8b17u47wg4nh" path="res://demo/players/local_player/LocalPlayer.tscn" id="3_hbc2u"]
 [ext_resource type="Environment" uid="uid://c5xw5iwomn8qo" path="res://demo/map/DefaultEnvironment.tres" id="4_4tv7j"]
-[ext_resource type="PackedScene" uid="uid://cfx1rqvxuku42" path="res://demo/players/dummy_player/DummyPlayer.tscn" id="4_torvr"]
-[ext_resource type="PackedScene" uid="uid://hh18mdgclbq6" path="res://demo/players/server_player/ServerPlayer.tscn" id="5_8xkvn"]
 [ext_resource type="Script" uid="uid://1rpyl54svogx" path="res://addons/monke-net/src/Shared/Nodes/Entities/EntitySpawnConfiguration.cs" id="6_p5x2j"]
 [ext_resource type="PackedScene" uid="uid://cdm6b7x3omwnr" path="res://demo/ball/LocalBall.tscn" id="7_torvr"]
 [ext_resource type="PackedScene" uid="uid://dr73i1u4dj11g" path="res://demo/ball/ServerBall.tscn" id="9_yvb8b"]
-[ext_resource type="PackedScene" uid="uid://dp8a4isumyhew" path="res://demo/ball/DummyBall.tscn" id="10_dumby"]
 [ext_resource type="PackedScene" uid="uid://cu3w7mhyotfhv" path="res://demo/vehicle/LocalVehicle.tscn" id="11_lveh"]
 [ext_resource type="PackedScene" uid="uid://b6sqb51sprj38" path="res://demo/vehicle/ServerVehicle.tscn" id="12_sveh"]
-[ext_resource type="PackedScene" uid="uid://ccbcx6qy3sqf8" path="res://demo/vehicle/DummyVehicle.tscn" id="13_dveh"]
+[ext_resource type="Script" uid="uid://cq1cu8wwxm0td" path="res://addons/monke-net/src/Shared/Nodes/Entities/OwnershipPolicy.cs" id="11_ownpol"]
 [ext_resource type="Script" uid="uid://df8rhrcg15uax" path="res://addons/monke-net/src/Shared/OfflineRigidbody3D.cs" id="14_offrb"]
 [ext_resource type="PackedScene" uid="uid://cxytv2su15ym8" path="res://demo/players/rigid_player/LocalRigidPlayer.tscn" id="15_lrp"]
 [ext_resource type="PackedScene" uid="uid://d1a7s0xyfwt6u" path="res://demo/players/rigid_player/ServerRigidPlayer.tscn" id="16_srp"]
-[ext_resource type="PackedScene" uid="uid://66l4uc615yvc" path="res://demo/players/rigid_player/DummyRigidPlayer.tscn" id="17_drp"]
 [ext_resource type="PackedScene" uid="uid://hnno4lwknkkq" path="res://demo/cube/LocalCube.tscn" id="18_lcube"]
 [ext_resource type="PackedScene" uid="uid://c7jvpob6fjg7d" path="res://demo/cube/ServerCube.tscn" id="19_scube"]
-[ext_resource type="PackedScene" uid="uid://djqdytwiyn1jk" path="res://demo/cube/DummyCube.tscn" id="20_dcube"]
-
-[sub_resource type="Resource" id="Resource_yvb8b"]
-script = ExtResource("6_p5x2j")
-ClientAuthorityScene = ExtResource("3_hbc2u")
-ClientDummyScene = ExtResource("4_torvr")
-ServerScene = ExtResource("5_8xkvn")
-metadata/_custom_type_script = "uid://1rpyl54svogx"
 
 [sub_resource type="Resource" id="Resource_3hf6u"]
 script = ExtResource("6_p5x2j")
 EntityType = 1
-ClientAuthorityScene = ExtResource("7_torvr")
-ClientDummyScene = ExtResource("10_dumby")
+ClientScene = ExtResource("7_torvr")
 ServerScene = ExtResource("9_yvb8b")
 metadata/_custom_type_script = "uid://1rpyl54svogx"
+
+[sub_resource type="Resource" id="Resource_veh_policy"]
+script = ExtResource("11_ownpol")
+RequireUnowned = true
+MaxRequesterDistance = 4.0
+AllowOwnerRelease = true
+metadata/_custom_type_script = "uid://cq1cu8wwxm0td"
 
 [sub_resource type="Resource" id="Resource_veh"]
 script = ExtResource("6_p5x2j")
 EntityType = 2
-ClientAuthorityScene = ExtResource("11_lveh")
-ClientDummyScene = ExtResource("13_dveh")
+ClientScene = ExtResource("11_lveh")
 ServerScene = ExtResource("12_sveh")
+; Players may claim a free vehicle within 4 m via RequestAuthority and release
+; via ReleaseAuthority. The demo's custom OwnershipApprover runs as a final
+; gate on top of this for compatibility with extra demo-side state tracking.
+OwnershipPolicy = SubResource("Resource_veh_policy")
 metadata/_custom_type_script = "uid://1rpyl54svogx"
 
 [sub_resource type="Resource" id="Resource_rplyr"]
 script = ExtResource("6_p5x2j")
 EntityType = 3
-ClientAuthorityScene = ExtResource("15_lrp")
-ClientDummyScene = ExtResource("17_drp")
+ClientScene = ExtResource("15_lrp")
 ServerScene = ExtResource("16_srp")
 metadata/_custom_type_script = "uid://1rpyl54svogx"
 
 [sub_resource type="Resource" id="Resource_cube"]
 script = ExtResource("6_p5x2j")
 EntityType = 4
-ClientAuthorityScene = ExtResource("18_lcube")
-; ClientDummyScene = LocalCube so server-owned cubes also run as predicted
-; entities on the client (local Jolt sim, snapshot-reconciled). Combined with
-; the force-sleep logic in LocalBallPrediction.MaybeForceSleep, this gives us:
-;   - When the server cube is awake/moving (player pushing it), client cube
-;     simulates locally in parallel; contact dynamics stay close to server's.
-;   - When the server cube has gone to sleep, client cube is force-slept too,
-;     so the body cannot drift / wake spuriously via cross-process Jolt micro-
-;     impulses. (Previously a sleeping server-side cube would "replay" on the
-;     client every 8 ticks as local Jolt slowly accumulated velocity until the
-;     misprediction threshold tripped.)
-ClientDummyScene = ExtResource("18_lcube")
+ClientScene = ExtResource("18_lcube")
 ServerScene = ExtResource("19_scube")
 metadata/_custom_type_script = "uid://1rpyl54svogx"
 
@@ -97,7 +81,7 @@ script = ExtResource("1_a3xwa")
 
 [node name="MonkeNetConfig" type="Node" parent="." unique_id=1801734743]
 script = ExtResource("2_rf2cd")
-EntitySpawnConfiguration = Array[Object]([SubResource("Resource_yvb8b"), SubResource("Resource_3hf6u"), SubResource("Resource_veh"), SubResource("Resource_rplyr"), SubResource("Resource_cube")])
+EntitySpawnConfiguration = Array[Object]([SubResource("Resource_3hf6u"), SubResource("Resource_veh"), SubResource("Resource_rplyr"), SubResource("Resource_cube")])
 metadata/_custom_type_script = "uid://dnkbivw2aixxo"
 
 [node name="Menu" type="Control" parent="." unique_id=796659374]
@@ -107,17 +91,6 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-
-[node name="SpawnButton" type="Button" parent="Menu" unique_id=81406506]
-layout_mode = 1
-anchors_preset = 1
-anchor_left = 1.0
-anchor_right = 1.0
-offset_left = -160.0
-offset_bottom = 31.0
-grow_horizontal = 0
-focus_mode = 0
-text = "Spawn Player"
 
 [node name="SpawnBallButton" type="Button" parent="Menu" unique_id=1672447597]
 layout_mode = 1
@@ -428,7 +401,6 @@ layout_mode = 2
 text = "⚠ No Server Response"
 horizontal_alignment = 2
 
-[connection signal="pressed" from="Menu/SpawnButton" to="." method="OnSpawnButtonPressed"]
 [connection signal="pressed" from="Menu/SpawnBallButton" to="." method="OnSpawnBallButtonPressed"]
 [connection signal="pressed" from="Menu/SpawnVehicleButton" to="." method="OnSpawnVehicleButtonPressed"]
 [connection signal="pressed" from="Menu/SpawnRigidPlayerButton" to="." method="OnSpawnRigidPlayerButtonPressed"]

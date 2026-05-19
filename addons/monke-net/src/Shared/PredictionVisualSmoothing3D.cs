@@ -3,21 +3,28 @@ using Godot;
 namespace MonkeNet.Shared;
 
 /// <summary>
-/// Hides reconciliation snaps from the player by lerping a visual root toward the
-/// physics body over a short window (default 100ms ≈ 6 ticks at 60Hz). The body
-/// teleports to the authoritative state immediately for collision correctness;
-/// the visible mesh appears to "catch up" smoothly.
+/// Continuous visual smoothing for predicted physics bodies. Once per physics
+/// tick the smoother diffs the body's actual motion since the last tick against
+/// the motion the body's <c>LinearVelocity</c>/<c>AngularVelocity</c> would
+/// have produced naturally over the tick. Anything left over is treated as an
+/// unexplained teleport (reconcile, sleep-sync, manual transform write) and
+/// absorbed into a world-space offset that decays exponentially toward zero.
+/// Visual is written as <c>Body + offset</c> in <c>_PhysicsProcess</c>, then
+/// Godot's SceneTreeFTI lerps it between consecutive physics-tick poses every
+/// render frame — same lerp path the body's other inherited children
+/// (CollisionShape3D debug wireframe, labels, prompts) use, so the mesh
+/// renders in lockstep with them.
 ///
-/// Usage in a scene:
-/// 1. Add a <see cref="Node3D"/> child of the body, set <c>top_level = true</c> so it
-///    keeps the absolute world transform (we set it explicitly each frame).
-/// 2. Move all visible nodes (MeshInstance3D, etc.) under that visual root.
-/// 3. Drop a <see cref="PredictionVisualSmoothing3D"/> alongside, wire <see cref="Body"/>
-///    and <see cref="Visual"/>, then point your <see cref="PredictionRigidbody3D"/>
-///    (or your custom reconciliation code) at this node so it gets called on reconcile.
+///   - Natural physics motion: offset doesn't grow, visual rides body lockstep.
+///   - Body teleports: jump is captured, visual stays where it was, offset
+///     decays over <see cref="DecayTime"/>.
 ///
-/// When no smoothing is in flight, the visual stays locked to the body's pose each
-/// <c>_Process</c> frame — this is what makes <c>top_level = true</c> safe to use.
+/// Pair with a <b>regular (non-top_level)</b> Visual node parented under the
+/// body. The smoother writes <c>Visual.GlobalPosition</c>; Godot converts to
+/// the local position relative to the body, and FTI then lerps the body's
+/// transform (and through it the Visual's render-frame pose) automatically.
+/// A top_level Visual bypasses that lerp and stair-steps at physics-tick rate
+/// — verified empirically against the wireframe on the same body.
 /// </summary>
 [GlobalClass, Icon("res://addons/monke-net/resources/circle_nodes_solid.png")]
 public partial class PredictionVisualSmoothing3D : Node3D
@@ -25,153 +32,227 @@ public partial class PredictionVisualSmoothing3D : Node3D
     [Export] public Node3D Body { get; set; }
     [Export] public Node3D Visual { get; set; }
 
-    /// <summary>How long the visual takes to catch up after a reconciliation snap.</summary>
-    [Export] public float DurationSec { get; set; } = 0.1f;
+    /// <summary>Time constant (seconds) for exponential offset decay. After
+    /// DecayTime seconds the offset has decayed to ~37% of its captured value;
+    /// after 3×DecayTime it is effectively zero. 0.1 s ≈ 6 ticks at 60Hz.</summary>
+    [Export] public float DecayTime { get; set; } = 0.1f;
 
-    /// <summary>
-    /// If the captured pre-reconcile offset is larger than this, the smoother snaps the
-    /// visual to the body instead of lerping. Smoothing a multi-meter correction looks
-    /// worse than a teleport because the visible mesh trails far behind collision for a
-    /// noticeable window. Set to 0 to disable the threshold and always smooth.
-    /// </summary>
+    /// <summary>Smallest position jump (meters) over a single frame, after
+    /// subtracting <c>LinearVelocity * dt</c>, that counts as a teleport. Below
+    /// this everything is treated as physics integration noise and ignored.</summary>
+    [Export] public float PositionJumpEpsilon { get; set; } = 0.002f;
+
+    /// <summary>Smallest rotation jump (radians) over a single frame, after
+    /// subtracting the rotation implied by <c>AngularVelocity * dt</c>, that
+    /// counts as a teleport.</summary>
+    [Export] public float RotationJumpEpsilonRad { get; set; } = 0.005f;
+
+    /// <summary>If the accumulated offset ever exceeds this, snap it to zero
+    /// instead of smoothing. Lerping a multi-meter correction looks worse than
+    /// a teleport because the visual trails far behind collision. 0 disables
+    /// the threshold.</summary>
     [Export] public float TeleportDistance { get; set; } = 5f;
 
+    // World-space position offset between visual and body. Decays toward zero.
     private Vector3 _posOffset;
+    // World-space rotation offset: Visual.Quaternion = _rotOffset * Body.Quaternion.
+    // Decays toward identity. World-frame (left-multiplied) keeps the teleport
+    // capture math symmetric with the position path — body rotates by R in
+    // world space, offset absorbs R⁻¹.
     private Quaternion _rotOffset = Quaternion.Identity;
-    private float _remaining;
 
-    // OnReconciled fires inside the resim loop, when the body has just been teleported
-    // to the authoritative pose but resim hasn't run yet. The offset captured here is
-    // (preVisual - bodyAuthoritative). After resim, body advances to its post-resim
-    // pose; the smoother then renders Visual = body_postresim + offset, which makes
-    // Visual *overshoot* its pre-reconcile pose by (body_postresim - bodyAuthoritative).
-    // To fix: stash the inputs and recompute the offset on the next _Process, when
-    // the body is at its post-resim pose. The initial offset is left as a best-guess
-    // estimate so IsSmoothing/CurrentOffset are sensible if anyone queries them
-    // before _Process runs.
-    private bool _pendingReconcile;
-    private Vector3 _pendingPreVisualPos;
-    private Quaternion _pendingPreVisualRot;
+    private Vector3 _prevBodyPos;
+    private Quaternion _prevBodyRot = Quaternion.Identity;
+    private bool _hasPrev;
 
-    /// <summary>
-    /// Records that a reconciliation just happened. Pass the visual's pose captured
-    /// **before** the body was teleported. The remaining offset between that pose and
-    /// the body's new pose decays linearly to zero over <see cref="DurationSec"/>.
-    /// Calling repeatedly is safe — each call resets the smoothing window.
-    /// </summary>
-    public void OnReconciled(Vector3 preVisualPosition, Quaternion preVisualRotation)
+    // Detection + decay + Visual write all run in _PhysicsProcess. Writing
+    // Visual every render frame from _Process would overwrite Godot's
+    // RenderingServer-side physics-tick interpolation — RS lerps only between
+    // transform values it observes, so a per-render-frame write collapses the
+    // lerp window to a single frame and shows the latest write directly.
+    // Inherited children of the body (label, prompt, knight rig on a rider,
+    // camera) all rely on that RS lerp to render smoothly between ticks; the
+    // top_level VisualRoot has to participate in the same lerp or the rider's
+    // camera (at the body's un-interpolated current-tick pose, plus whatever
+    // smoothing Godot applies) sees the vehicle visual slide and snap each
+    // tick. Writing once per physics tick from here keeps mesh + label +
+    // camera all in the same interpolation frame.
+    public override void _EnterTree()
     {
-        if (Body == null || Visual == null || DurationSec <= 0f)
-        {
-            _remaining = 0f;
-            _pendingReconcile = false;
-            return;
-        }
-        _posOffset = preVisualPosition - Body.GlobalPosition;
-        _rotOffset = Body.Quaternion.Inverse() * preVisualRotation;
+        // Explicit enable — override of _PhysicsProcess does not always auto-
+        // enable physics processing for Node3D nodes added programmatically
+        // (verified empirically: a dynamically AddChild'd smoother's _Process
+        // started firing one tick before _PhysicsProcess did, missing the
+        // first-tick prev-pose baseline).
+        SetPhysicsProcess(true);
+        SetProcess(true);
 
-        if (TeleportDistance > 0f && _posOffset.Length() > TeleportDistance)
-        {
-            _posOffset = Vector3.Zero;
-            _rotOffset = Quaternion.Identity;
-            _remaining = 0f;
-            _pendingReconcile = false;
-            return;
-        }
-        _remaining = DurationSec;
-        _pendingPreVisualPos = preVisualPosition;
-        _pendingPreVisualRot = preVisualRotation;
-        _pendingReconcile = true;
+        // Disable Godot SceneTreeFTI on the body's subtree so the visual mesh
+        // and any inherited children (label, debug prompt, …) render at the
+        // same un-interpolated physics-tick pose as the body's debug wireframe
+        // — which is pushed to RenderingServer by CollisionObject3D's
+        // _on_transform_changed using the body's current global transform
+        // (no FTI lerp; RS no longer interpolates instances either).
+        //
+        // With FTI on, the mesh lerps smoothly between consecutive physics-
+        // tick poses while the wireframe stair-steps; their relative position
+        // alternates every render frame as `Engine.GetPhysicsInterpolationFraction()`
+        // cycles 0 → 1 over each tick, which is perceived as the visual
+        // "jumping back and forth" relative to the wireframe ~120 times per
+        // second. Disabling FTI on the body costs the mesh's between-tick
+        // smoothness (it stair-steps at physics rate, same as the wireframe)
+        // but eliminates the oscillation. At 60 Hz physics and >=120 fps
+        // render the body's per-tick motion is small enough that the eye
+        // perceives the step pattern as smooth, the same way the wireframe
+        // already looks smooth.
+        if (Body != null)
+            Body.PhysicsInterpolationMode = Node.PhysicsInterpolationModeEnum.Inherit;
     }
 
-    public override void _Process(double delta)
+    public override void _PhysicsProcess(double delta)
     {
         if (Body == null || Visual == null) return;
 
-        if (_pendingReconcile)
+        Vector3 bodyPos = Body.GlobalPosition;
+        Quaternion bodyRot = Body.Quaternion;
+        float dt = (float)delta;
+
+        if (_hasPrev && dt > 0f)
         {
-            _pendingReconcile = false;
-            // Body has now settled at its post-resim pose. Recompute the offset against
-            // it so Visual.GlobalPosition = body + offset starts at preVisualPos exactly.
-            _posOffset = _pendingPreVisualPos - Body.GlobalPosition;
-            _rotOffset = Body.Quaternion.Inverse() * _pendingPreVisualRot;
-            // Re-check teleport threshold — post-resim offset can be much smaller (or larger)
-            // than the just-teleported one, and we want the threshold applied to the value
-            // that actually drives the lerp.
-            if (TeleportDistance > 0f && _posOffset.Length() > TeleportDistance)
-            {
-                _posOffset = Vector3.Zero;
-                _rotOffset = Quaternion.Identity;
-                _remaining = 0f;
-            }
+            CaptureUnexplainedJump(bodyPos, bodyRot, dt);
         }
 
-        if (_remaining > 0f)
-        {
-            _remaining = Mathf.Max(0f, _remaining - (float)delta);
-            float t = DurationSec > 0f ? _remaining / DurationSec : 0f;
-            Visual.GlobalPosition = Body.GlobalPosition + _posOffset * t;
-            // Slerp the body-relative rotation offset toward identity as t decays.
-            Visual.Quaternion = Body.Quaternion * Quaternion.Identity.Slerp(_rotOffset, t);
-        }
-        else
-        {
-            // No smoothing in flight — visual is locked to the body each frame.
-            Visual.GlobalPosition = Body.GlobalPosition;
-            Visual.Quaternion = Body.Quaternion;
-        }
-    }
+        float alpha = DecayTime > 0f ? Mathf.Exp(-dt / DecayTime) : 0f;
+        _posOffset *= alpha;
+        _rotOffset = Quaternion.Identity.Slerp(_rotOffset.Normalized(), alpha);
 
-    /// <summary>
-    /// Visual-only soft correction. Adds <paramref name="worldOffset"/> to the offset
-    /// between the visual mesh and the body, then decays it back to zero over
-    /// <see cref="DurationSec"/>. Use from per-snapshot soft-correction logic that wants
-    /// to nudge the rendered pose toward authoritative without disturbing the simulated
-    /// body — mutating <c>body.GlobalPosition</c> directly invalidates Jolt's persistent
-    /// contact cache and causes more drift than it fixes.
-    /// Calling repeatedly accumulates the offset and refreshes the decay window.
-    /// No-op if Body or Visual is unwired or DurationSec is non-positive.
-    /// </summary>
-    public void AddDriftCorrection(Vector3 worldOffset)
-    {
-        if (Body == null || Visual == null || DurationSec <= 0f) return;
-
-        // If a reconciliation is still pending its post-resim recapture, fold the new
-        // offset into the pending pre-visual position so the eventual recompute against
-        // the post-resim body pose absorbs it correctly.
-        if (_pendingReconcile)
-        {
-            _pendingPreVisualPos += worldOffset;
-            return;
-        }
-
-        // Collapse the currently-rendered offset (_posOffset * t) into the stored value
-        // before stacking a new shift on top. Without this, callers that fire every
-        // snapshot (e.g. ApplySoftCorrection) keep resetting _remaining to DurationSec
-        // before any decay completes, so _posOffset accumulates unbounded and the visual
-        // drifts arbitrarily far from the body. Collapsing keeps the rendered visual
-        // continuous: post-call render = pre-call render + worldOffset.
-        float t = _remaining > 0f && DurationSec > 0f ? _remaining / DurationSec : 0f;
-        _posOffset = _posOffset * t + worldOffset;
-        _rotOffset = Quaternion.Identity.Slerp(_rotOffset, t);
-        _remaining = DurationSec;
-
-        // Hard cap: a runaway accumulation past TeleportDistance would render the visual
-        // arbitrarily far from the body. Snap the offset back to zero in that case —
-        // matches the same threshold OnReconciled uses.
         if (TeleportDistance > 0f && _posOffset.Length() > TeleportDistance)
         {
             _posOffset = Vector3.Zero;
             _rotOffset = Quaternion.Identity;
-            _remaining = 0f;
+        }
+
+        // Write the global transform atomically. For a non-top_level Visual,
+        // Visual.Quaternion would set LOCAL rotation — yielding global =
+        // body.basis * (rotOffset * bodyRot) and rotating the visual by the
+        // body's basis twice. Setting GlobalTransform routes through Godot's
+        // setter, which converts the desired global to local via the parent's
+        // current global, so the visual's resulting global rotation is exactly
+        // (rotOffset * bodyRot) regardless of parent rotation.
+        Visual.GlobalTransform = new Transform3D(new Basis((_rotOffset * bodyRot).Normalized()), bodyPos + _posOffset);
+
+        _prevBodyPos = bodyPos;
+        _prevBodyRot = bodyRot;
+        _hasPrev = true;
+    }
+
+    // Per-render-frame smoothness trace. Only logs; does NOT write Visual —
+    // _PhysicsProcess owns that so RenderingServer can interpolate. Removed
+    // once verification is complete.
+    private bool _loggedFtiState;
+
+    public override void _Process(double delta)
+    {
+        if (Body is not RigidBody3D rbDbg || Visual == null) return;
+
+        // One-time log of FTI / interp configuration so we can verify the
+        // assumed pipeline is active in the running build.
+        if (!_loggedFtiState)
+        {
+            _loggedFtiState = true;
+            var tree = GetTree();
+            bool treeInterp = tree != null && tree.IsPhysicsInterpolationEnabled();
+            bool bodyInTree = Body.IsInsideTree();
+            bool bodyVisible = Body.Visible;
+            string stateMsg = $"[SMOOTH-FTI-STATE] body={Body.Name} treeInterp={treeInterp} bodyInTree={bodyInTree} bodyVisible={bodyVisible} bodyInterpMode={Body.PhysicsInterpolationMode} visInterpMode={Visual.PhysicsInterpolationMode} physTicksPerSec={Engine.PhysicsTicksPerSecond} maxFps={Engine.MaxFps} visIsTopLevel={Visual.TopLevel}";
+            MonkeLogger.Debug(stateMsg);
+            // Also surface to stdout so the user can sanity-check FTI is on in
+            // their interactive run without having to open the monke-net log.
+            GD.Print(stateMsg);
+        }
+
+        // --- BODY state at render-frame read time ---
+        Transform3D bodyGlobal = Body.GlobalTransform;
+        Vector3 bodyPosUninterp = bodyGlobal.Origin;
+        Quaternion bodyRotUninterp = bodyGlobal.Basis.GetRotationQuaternion();
+        Transform3D bodyGlobalFti = Body.GetGlobalTransformInterpolated();
+        Vector3 bodyPosFti = bodyGlobalFti.Origin;
+        Quaternion bodyRotFti = bodyGlobalFti.Basis.GetRotationQuaternion();
+        bool bodyFtiSame = bodyPosUninterp.IsEqualApprox(bodyPosFti);
+
+        // --- VISUAL state at render-frame read time ---
+        Transform3D visGlobal = Visual.GlobalTransform;
+        Vector3 visPosUninterp = visGlobal.Origin;
+        Quaternion visRotUninterp = visGlobal.Basis.GetRotationQuaternion();
+        Transform3D visLocal = Visual.Transform; // Local transform (relative to parent)
+        Transform3D visGlobalFti = Visual.GetGlobalTransformInterpolated();
+        Vector3 visPosFti = visGlobalFti.Origin;
+        Quaternion visRotFti = visGlobalFti.Basis.GetRotationQuaternion();
+        bool visFtiSame = visPosUninterp.IsEqualApprox(visPosFti);
+
+        // Δrotation between body and visual at render time — both via their
+        // FTI-interpolated transforms. If FTI lerps both in lockstep with the
+        // same window, this delta should be near-constant (== smoother
+        // _rotOffset). If they're on different lerp paths, delta wobbles
+        // every render frame — that's the "rotation out of sync" report.
+        Quaternion bodyVsVisRotDelta = (bodyRotFti.Inverse() * visRotFti).Normalized();
+
+        double interpFrac = Engine.GetPhysicsInterpolationFraction();
+        ulong physFrame = Engine.GetPhysicsFrames();
+        MonkeLogger.Debug($"[SMOOTH-FRAME] body={Body.Name} pf={physFrame} dt={delta:F5} pif={interpFrac:F3} " +
+            $"raw=({bodyPosUninterp.X:F5},{bodyPosUninterp.Y:F5},{bodyPosUninterp.Z:F5}) " +
+            $"bodyRot=({bodyRotUninterp.X:F4},{bodyRotUninterp.Y:F4},{bodyRotUninterp.Z:F4},{bodyRotUninterp.W:F4}) " +
+            $"bodyFti=({bodyPosFti.X:F5},{bodyPosFti.Y:F5},{bodyPosFti.Z:F5}) bodyFtiSame={bodyFtiSame} " +
+            $"interp=({bodyPosUninterp.X:F5},{bodyPosUninterp.Y:F5},{bodyPosUninterp.Z:F5}) " +
+            $"vis=({visPosUninterp.X:F5},{visPosUninterp.Y:F5},{visPosUninterp.Z:F5}) " +
+            $"visRot=({visRotUninterp.X:F4},{visRotUninterp.Y:F4},{visRotUninterp.Z:F4},{visRotUninterp.W:F4}) " +
+            $"visLocal=({visLocal.Origin.X:F5},{visLocal.Origin.Y:F5},{visLocal.Origin.Z:F5}) " +
+            $"visFti=({visPosFti.X:F5},{visPosFti.Y:F5},{visPosFti.Z:F5}) visFtiSame={visFtiSame} " +
+            $"vsBodyRotΔ=({bodyVsVisRotDelta.X:F4},{bodyVsVisRotDelta.Y:F4},{bodyVsVisRotDelta.Z:F4},{bodyVsVisRotDelta.W:F4}) " +
+            $"vel=({rbDbg.LinearVelocity.X:F4},{rbDbg.LinearVelocity.Y:F4},{rbDbg.LinearVelocity.Z:F4})");
+    }
+
+    // Diff actual body motion against the motion implied by Velocity/AngVel*dt.
+    // Excess is folded into the offsets so the visual stays at its rendered pose
+    // across whatever produced the jump (Reconcile, SyncSleepState, etc.).
+    private void CaptureUnexplainedJump(Vector3 bodyPos, Quaternion bodyRot, float dt)
+    {
+        Vector3 linVel = Body is RigidBody3D rbLin ? rbLin.LinearVelocity : Vector3.Zero;
+        Vector3 expectedPosDelta = linVel * dt;
+        Vector3 jumpPos = (bodyPos - _prevBodyPos) - expectedPosDelta;
+        if (jumpPos.LengthSquared() > PositionJumpEpsilon * PositionJumpEpsilon)
+        {
+            _posOffset -= jumpPos;
+        }
+
+        Vector3 angVel = Body is RigidBody3D rbAng ? rbAng.AngularVelocity : Vector3.Zero;
+        Quaternion expectedRot = AngularDelta(angVel, dt);
+        Quaternion actualRot = (bodyRot * _prevBodyRot.Inverse()).Normalized();
+        Quaternion jumpRot = (expectedRot.Inverse() * actualRot).Normalized();
+        // |jumpRot.W| is cos(angle/2); guard against sign flips by taking abs.
+        float jumpAngle = 2f * Mathf.Acos(Mathf.Clamp(Mathf.Abs(jumpRot.W), -1f, 1f));
+        if (jumpAngle > RotationJumpEpsilonRad)
+        {
+            _rotOffset = (_rotOffset * jumpRot.Inverse()).Normalized();
         }
     }
 
-    /// <summary>True while the visual is still catching up to the body.</summary>
-    public bool IsSmoothing => _remaining > 0f;
+    // Quaternion that rotates by (angVel * dt) around the angVel axis. Mirrors
+    // the semi-implicit Euler step Godot/Jolt uses for free-flying bodies, so
+    // for natural motion expectedRot ≈ actualRot to within float precision.
+    private static Quaternion AngularDelta(Vector3 angVel, float dt)
+    {
+        float speed = angVel.Length();
+        if (speed < 1e-6f) return Quaternion.Identity;
+        Vector3 axis = angVel / speed;
+        return new Quaternion(axis, speed * dt);
+    }
 
-    /// <summary>Current world-space position offset between visual and body. Zero when not smoothing.</summary>
-    public Vector3 CurrentOffset => _remaining > 0f && DurationSec > 0f
-        ? _posOffset * (_remaining / DurationSec)
-        : Vector3.Zero;
+    /// <summary>True while the visual is meaningfully offset from the body.</summary>
+    public bool IsSmoothing =>
+        _posOffset.LengthSquared() > 1e-8f
+        || Mathf.Abs(_rotOffset.W) < 0.99999f;
+
+    /// <summary>Current world-space position offset between visual and body.</summary>
+    public Vector3 CurrentOffset => _posOffset;
 }

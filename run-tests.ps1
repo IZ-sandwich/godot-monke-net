@@ -4,8 +4,57 @@ param(
     # suite or test. Matched as a substring against the test's FullyQualifiedName,
     # so partial names work too. When omitted, runs the full inner-loop suite.
     [Parameter(Position=0)]
-    [string]$Test
+    [string]$Test,
+
+    # Print usage and exit. -h is recognised as a short alias.
+    [Alias('h')]
+    [switch]$Help
 )
+
+if ($Help) {
+    Write-Host @'
+Usage: run-tests.ps1 [<TestSelector>] [-Help]
+
+Runs the inner-loop test suite (everything EXCEPT MonkeNet.Tests.MultiProcess).
+The multi-process suite is excluded because each of its tests spawns separate
+Godot child processes and adds several seconds each; use run-multiprocess-tests.ps1
+to run those on demand.
+
+Arguments:
+  TestSelector   Optional substring matched against each test's
+                 FullyQualifiedName via dotnet test's --filter. Accepts a class
+                 name, a method name, or class.method. When omitted, runs the
+                 full inner-loop suite. When passed, overrides the default
+                 "exclude MultiProcess" filter -- if you really want a multi-
+                 process test, name it explicitly here.
+
+Options:
+  -Help, -h      Print this message and exit.
+
+Outputs:
+  test-output.log     stdout from `dotnet test`
+  test-error.log      stderr from `dotnet test`
+  exit code           propagated from `dotnet test`
+
+Examples:
+  run-tests.ps1
+      Run the entire inner-loop suite (~3 minutes).
+
+  run-tests.ps1 ClockTests
+      Run every test inside the ClockTests class.
+
+  run-tests.ps1 Clock_ImmediateCorrection_ClearsBuffersToAvoidWindowDoubleCount
+      Run a single test by exact method name.
+
+  run-tests.ps1 RollbackTests.InitialSnapshot_TriggersCatchUpWithoutMispredict
+      Run a specific method via class.method.
+
+  run-tests.ps1 NetworkConditions
+      Run every test whose name contains "NetworkConditions" (the whole
+      NetworkConditionTests class).
+'@
+    exit 0
+}
 
 $env:GODOT_BIN = "C:\Users\ivanz\Godot\godot-mp-modified\bin\godot.windows.editor.dev.x86_64.mono.console.exe"
 
@@ -35,5 +84,5 @@ if (-not $proc.WaitForExit(540000)) {
     exit 1
 }
 
-Get-Content "test-output.log" | Select-String "Total tests:|  Passed |  Failed |Error Message:"
+Get-Content "test-output.log"
 exit $proc.ExitCode

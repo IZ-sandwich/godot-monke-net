@@ -31,7 +31,6 @@ public partial class ClientManager : Node
     public static ClientManager Instance { get; private set; }
 
     private INetworkManager _networkManager;
-    private ClientSnapshotInterpolator _snapshotInterpolator;
     private ClientNetworkClock _clock;
     private NetworkDebug _networkDebug;
     private ClientEntityManager _entityManager;
@@ -94,7 +93,6 @@ public partial class ClientManager : Node
     {
         _networkDebug = GetNode<NetworkDebug>("NetworkDebug");
         _clock = GetNode<ClientNetworkClock>("ClientNetworkClock");
-        _snapshotInterpolator = GetNode<ClientSnapshotInterpolator>("SnapshotInterpolator");
         _entityManager = GetNode<ClientEntityManager>("ClientEntityManager");
         _inputManager = GetNode<ClientInputManager>("ClientInputManager");
         _predictionManager = GetNode<ClientPredictionManager>("PredictionManager");
@@ -135,6 +133,15 @@ public partial class ClientManager : Node
             MonkeLogger.Debug($"[CLIENT-TICK] tick={currentTick} SpaceStep (pure-client)");
             PhysicsServer3D.SpaceStep(MonkeNetManager.Instance.PhysicsSpace, PhysicsUtils.DeltaTime);
             PhysicsServer3D.SpaceFlushQueries(MonkeNetManager.Instance.PhysicsSpace);
+            // Post-step entity hook. Runs after every body's post-step pose is
+            // visible on the scene tree. Used by a kinematic rider to re-anchor
+            // to the vehicle's just-integrated pose so its FTI lerp window
+            // matches the vehicle's — without this, OnProcessTick's pre-step
+            // anchor lags vehicle motion by exactly one tick, which makes the
+            // first-person camera (a child of the rider body) render the world
+            // from a viewpoint 1 tick behind the vehicle mesh, perceived as
+            // oscillation between mesh and camera every render frame.
+            _predictionManager.RunPostPhysicsTick(currentTick, input);
             _predictionManager.RegisterPrediction(currentTick, input);
         }
         else
@@ -251,10 +258,11 @@ public partial class ClientManager : Node
 
     /// <summary>
     /// Asks the server to transfer authority of <paramref name="entityId"/> to this client.
-    /// Server runs <c>ServerEntityManager.OwnershipApprover</c>; on approve, the normal
-    /// Destroy+Create authority-swap path runs, on reject the client receives an
-    /// <see cref="OwnershipChangeRejectedMessage"/>. Default policy is reject — the game
-    /// must register an approver server-side or no request will ever succeed.
+    /// Server evaluates the per-entity <c>OwnershipPolicy</c> (and the optional custom
+    /// <c>ServerEntityManager.OwnershipApprover</c>) — on approval it broadcasts
+    /// <see cref="AuthorityChangedMessage"/>, on rejection the requester receives
+    /// <see cref="OwnershipChangeRejectedMessage"/>. The client never mutates local
+    /// state until the server's response arrives.
     /// </summary>
     public void RequestAuthority(int entityId)
     {
@@ -263,16 +271,15 @@ public partial class ClientManager : Node
     }
 
     /// <summary>
-    /// Anticipated variant of <see cref="RequestAuthority"/>: flips the local entity's
-    /// scene from dummy to predicted immediately so the player can drive it without
-    /// waiting one RTT for server confirmation. On reject (or timeout) the client
-    /// reverts to the dummy at the original pose. Use when responsiveness matters
-    /// (vehicle entry, item pickup) and a brief revert-flicker on rejection is
-    /// acceptable.
+    /// Asks the server to release authority over <paramref name="entityId"/> back to the
+    /// server (Authority=0). Server validates the sender is the current owner and that the
+    /// entity's <c>OwnershipPolicy.AllowOwnerRelease</c> is true, then broadcasts
+    /// <see cref="AuthorityChangedMessage"/>. No local mutation until confirmation.
     /// </summary>
-    public void RequestAuthorityAnticipated(int entityId)
+    public void ReleaseAuthority(int entityId)
     {
-        _entityManager.RequestAuthorityAnticipated(entityId);
+        SendCommandToServer(new ReleaseAuthorityMessage { EntityId = entityId },
+            INetworkManager.PacketModeEnum.Reliable, (int)ChannelEnum.GameReliable);
     }
 
     public int GetNetworkId()
@@ -310,7 +317,6 @@ public partial class ClientManager : Node
             ImGui.Text($"Physics Tick {Engine.PhysicsTicksPerSecond}hz");
             _clock.DisplayDebugInformation();
             _networkDebug.DisplayDebugInformation();
-            _snapshotInterpolator.DisplayDebugInformation();
             _inputManager.DisplayDebugInformation();
             _predictionManager.DisplayDebugInformation();
             ImGui.End();

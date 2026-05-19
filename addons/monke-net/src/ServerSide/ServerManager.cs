@@ -131,15 +131,21 @@ public partial class ServerManager : Node
         if (MonkeNetManager.Instance?.EntitySpawner == null) return;
         foreach (var node in MonkeNetManager.Instance.EntitySpawner.Entities)
         {
-            if (node is NetworkBehaviour serverEntity)
-            {
-                IPackableElement input = _inputReceiver.GetInputForEntityTick(serverEntity, currentTick);
+            if (node is not NetworkBehaviour serverEntity) continue;
 
-                var serverStateSyncronizer = serverEntity.GetComponent<ServerStateSyncronizer>();
-                if (input != null && serverStateSyncronizer != null)
-                {
-                    serverStateSyncronizer.OnProcessTick(currentTick, input);
-                }
+            // Authority == 0 means a server-owned prop (cube, ball, parked vehicle).
+            // No client is sending input for it, so querying the input receiver would
+            // just count a "miss" every tick and pollute the per-client metric keyed
+            // under authority 0 — visible as missed-input climbing forever after
+            // spawning N rigid props.
+            if (serverEntity.Authority == 0) continue;
+
+            IPackableElement input = _inputReceiver.GetInputForEntityTick(serverEntity, currentTick);
+
+            var serverStateSyncronizer = serverEntity.GetComponent<ServerStateSyncronizer>();
+            if (input != null && serverStateSyncronizer != null)
+            {
+                serverStateSyncronizer.OnProcessTick(currentTick, input);
             }
         }
     }
@@ -163,6 +169,14 @@ public partial class ServerManager : Node
     public int GetNetworkId()
     {
         return _networkManager.GetNetworkId();
+    }
+
+    /// <summary>Number of currently-connected client peers, as tracked by the
+    /// underlying <see cref="INetworkManager"/>. Used by multi-process lifecycle
+    /// tests that verify peer state is correctly cleared across stop/restart.</summary>
+    public int GetConnectedClientCount()
+    {
+        return _networkManager?.GetConnectedPeerIds().Count ?? 0;
     }
 
     public ServerEntityManager EntityManager => _entityManager;

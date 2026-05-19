@@ -16,12 +16,14 @@ namespace MonkeNet.Tests.Integration;
 /// NC-01..NC-04: Behaviour under simulated network conditions (drop, latency,
 /// jitter, burst loss).
 ///
-/// All tests use a SERVER-AUTHORITATIVE entity (entityType=1, the demo's ball
-/// with authority=0). The ball has gravity and falls under server simulation;
-/// the client's <see cref="GameDemo.DummyBallStateInterpolation"/> renders an
-/// interpolated dummy. This makes server-side motion happen automatically
-/// without an input producer, which is required for the client-side dummy to
-/// observe drift / lag / smoothness as snapshots vary.
+/// All tests use a SERVER-AUTHORITATIVE entity (entityType=4, the demo's cube
+/// with authority=0). Cubes are wired with <c>ClientDummyScene = LocalCube</c>,
+/// so server-owned cubes are still rendered through the predicted-rigid-prop
+/// path (<see cref="GameDemo.LocalRigidPropPrediction"/>) on the client — the
+/// body simulates locally every physics tick and reconciles against the
+/// server's snapshot. This is the framework's current primary sync path for
+/// rigid bodies, so the network-conditions assertions exercise the production
+/// reconcile path rather than a pure interpolated dummy.
 ///
 /// Loss / queueing is applied to the snapshot channel only via
 /// <see cref="ChannelEnum.Snapshot"/>; reliable channels (entity events,
@@ -49,7 +51,7 @@ public class NetworkConditionTests
     {
         MonkeNetConfig.Instance = null;
         FakeNetworkBridge.Reset();
-        ClientEntityManager.ClearSavedReclaimToken();
+        ClientEntityManager.ClearAwaitingReconnect();
         MessageSerializer.RegisterNetworkMessages();
         (_serverNet, _clientNet) = FakeNetworkBridge.CreatePair();
 
@@ -93,7 +95,7 @@ public class NetworkConditionTests
     [TestCase(0.25f, 1.50f)]
     public async Task NetworkConditions_DropRateBoundsClientServerDrift(float lossRate, float maxDriftMeters)
     {
-        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 1, authority: 0);
+        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 4, authority: 0);
         await _serverRunner.AwaitIdleFrame();
         await _clientRunner.AwaitIdleFrame();
         AssertEntityExistsOnBothSides();
@@ -121,7 +123,7 @@ public class NetworkConditionTests
 
     // NC-02 (suggestion #5) ─────────────────────────────────────────────────────
     // Convergence after lag spike: hold all snapshots for 30 ticks (a half-second
-    // at 60 Hz, well past MaxRollbackTicks distance for soft correction), then
+    // at 60 Hz, well past MaxRollbackTicks distance), then
     // resume normal delivery. After 30 ticks of unimpeded delivery the client
     // dummy must be within 2 cm of the server.
     //
@@ -130,7 +132,7 @@ public class NetworkConditionTests
     [TestCase]
     public async Task NetworkConditions_LagSpikeRecoversAfterDrain()
     {
-        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 1, authority: 0);
+        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 4, authority: 0);
         await _serverRunner.AwaitIdleFrame();
         await _clientRunner.AwaitIdleFrame();
         AssertEntityExistsOnBothSides();
@@ -168,15 +170,17 @@ public class NetworkConditionTests
     }
 
     // NC-03 (suggestion #6) ─────────────────────────────────────────────────────
-    // Jitter resilience: when snapshot delivery is uneven (alternating burst/idle
-    // pattern), the client interpolator must not produce frame-to-frame position
-    // jumps greater than 0.6 m. The ball is in free fall so the only frame-to-
-    // frame motion is gravity (v(t) = g*t, max ~5 m/s after 30 ticks → 0.083 m
-    // per 60 Hz frame); a stall+catchup spike would 5×−10× that delta.
+    // Jitter resilience: under the unified-prediction model the client predicts the
+    // cube locally each physics tick (Jolt sim) and reconciles to snapshot pose only
+    // when divergence exceeds LocalRigidPropPrediction's threshold (~20 cm). So the
+    // frame-to-frame body delta under jitter is the worst case of (a) one tick of
+    // free-fall gravity, ~0.083 m, plus (b) a hard reconcile of up to ~1 m when a
+    // long-delayed snapshot finally arrives carrying a large position delta. Smooth
+    // visuals are now the smoother's job (a separate concern from the body).
     [TestCase]
     public async Task NetworkConditions_JitterProducesSmoothInterpolation()
     {
-        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 1, authority: 0);
+        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 4, authority: 0);
         await _serverRunner.AwaitIdleFrame();
         await _clientRunner.AwaitIdleFrame();
         AssertEntityExistsOnBothSides();
@@ -210,8 +214,8 @@ public class NetworkConditionTests
         }
 
         AssertThat(maxFrameDelta)
-            .OverrideFailureMessage($"max frame delta {maxFrameDelta:F4} m exceeds 0.6 m budget under jitter")
-            .IsLess(0.6f);
+            .OverrideFailureMessage($"max frame delta {maxFrameDelta:F4} m exceeds 1.5 m budget under jitter")
+            .IsLess(1.5f);
     }
 
     // NC-04 (suggestion #7) ─────────────────────────────────────────────────────
@@ -222,7 +226,7 @@ public class NetworkConditionTests
     [TestCase]
     public async Task NetworkConditions_BurstLossRecoversWithoutDivergence()
     {
-        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 1, authority: 0);
+        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 4, authority: 0);
         await _serverRunner.AwaitIdleFrame();
         await _clientRunner.AwaitIdleFrame();
         AssertEntityExistsOnBothSides();

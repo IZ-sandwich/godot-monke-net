@@ -77,6 +77,21 @@ public partial class ServerInputReceiver : InternalServerComponent
                 _defaultInputCache.TryGetValue(serverEntity, out result);
                 source = "default";
             }
+            // Critical: keep _lastInputStored in sync with the input ACTUALLY
+            // APPLIED this tick — not just the last received one. PackSnapshot
+            // calls GetLastInputFor() to fill GameSnapshotMessage.Inputs[],
+            // and observers cache that and re-apply it for their local
+            // prediction of the entity. Without this assignment, when an
+            // owner stops sending input and the server falls back to "default"
+            // after the stale timeout, the server applies (move=0) locally
+            // but the snapshot keeps reporting the LAST RECEIVED input
+            // (e.g. move=(1,0)) forever — so every observer's prediction
+            // accelerates the body each resim tick while the server keeps
+            // it stopped, producing a constant stream of mispredictions
+            // whenever the snapshot arrives (observed as "constant mispredicts
+            // when a player changes direction" — i.e. when they stop pressing
+            // keys after a directional change).
+            _lastInputStored[serverEntity] = result;
         }
         MonkeLogger.Debug($"[NET-INPUT-CONSUME] tick={tick} eid={serverEntity.EntityId} authority={serverEntity.Authority} source={source} input={result?.ToString() ?? "null"}");
 
@@ -89,6 +104,19 @@ public partial class ServerInputReceiver : InternalServerComponent
         if (window.Count > MissedInputWindowSize) window.Dequeue();
 
         return result;
+    }
+
+    /// <summary>
+    /// Returns the most recent input the server processed for <paramref name="serverEntity"/>,
+    /// or null if no input has ever been consumed (e.g. server-authoritative passive prop).
+    /// Used by <see cref="ServerEntityManager"/> when packing the snapshot so observers
+    /// receive each entity's owner-supplied input and can apply it to their local
+    /// prediction — without it, observers can only coast at last-known velocity and
+    /// reconcile against every snapshot.
+    /// </summary>
+    public IPackableElement GetLastInputFor(NetworkBehaviour serverEntity)
+    {
+        return _lastInputStored.TryGetValue(serverEntity, out var input) ? input : null;
     }
 
     public int GetMissedInputTotal(int clientId) =>

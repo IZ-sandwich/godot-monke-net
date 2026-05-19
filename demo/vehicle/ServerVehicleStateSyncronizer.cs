@@ -32,6 +32,7 @@ public partial class ServerVehicleStateSyncronizer : ServerStateSyncronizer
             Rotation = state.Rotation,
             Velocity = state.LinearVelocity,
             AngularVelocity = state.AngularVelocity,
+            ServerSleeping = _predictionRb.Body != null && _predictionRb.Body.Sleeping,
         };
     }
 }

@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using GdUnit4;
@@ -12,17 +11,32 @@ using static GdUnit4.Assertions;
 namespace MonkeNet.Tests.Integration;
 
 /// <summary>
-/// R-01..R-07: Entity retention and session token reclaim tests.
+/// R-01..R-09: Entity retention and reclaim under the
+/// <see cref="ClientPersistentIdentity"/> design.
 ///
-/// Verifies that ServerConnectionMonitor issues session tokens, orphans entities in
-/// KeepEntity mode, and that reconnecting clients can reclaim their entities using
-/// the server-issued token.
+/// New flow (replaces the previous server-issued one-shot session-token
+/// design): on connect, the client sends a <see cref="ClientHelloMessage"/>
+/// carrying its persistent client id (CLI override, file in user://, or
+/// freshly generated GUID — see <see cref="ClientPersistentIdentity"/>).
+/// The server's <see cref="ServerConnectionMonitor"/> stores the peer→id
+/// mapping; on disconnect it parks the player's entities in a reclaim
+/// entry keyed by that persistent id; on any later reconnect with the
+/// same id it looks up the entry and reassigns Authority — no client-sent
+/// reclaim message, no one-shot consume, just a lookup keyed by stable
+/// identity that the same client can present any number of times.
+///
+/// These tests inject <c>ClientHelloMessage</c> directly through the
+/// <see cref="FakeNetworkBridge"/> so we don't need to wait for the full
+/// clock-sync handshake that drives <c>OnNetworkReady</c> on the client
+/// side. The hello-send-on-NetworkReady path itself is exercised end to
+/// end by the multi-process persistence suite.
 /// </summary>
 [TestSuite]
 [RequireGodotRuntime]
 public class EntityRetentionTests
 {
     private const int ClientPeerId = 2;
+    private const string ClientAId = "client-a-persistent-id";
 
     private FakeNetworkEndpoint _serverNet;
     private FakeNetworkEndpoint _clientNet;
@@ -38,7 +52,7 @@ public class EntityRetentionTests
     {
         MonkeNetConfig.Instance = null;
         FakeNetworkBridge.Reset();
-        MonkeNet.Client.ClientEntityManager.ClearSavedReclaimToken();
+        MonkeNet.Client.ClientEntityManager.ClearAwaitingReconnect();
         MessageSerializer.RegisterNetworkMessages();
         (_serverNet, _clientNet) = FakeNetworkBridge.CreatePair();
 
@@ -73,26 +87,21 @@ public class EntityRetentionTests
     }
 
     // R-01 ─────────────────────────────────────────────────────────────────────
+    // Hello carries the client's persistent id to the server, where it gets
+    // mapped to the peer's netId. Replaces the server-issued-session-token
+    // path entirely — there is no longer any server-to-client identity packet
+    // on connect.
     [TestCase]
-    public async Task SessionToken_SentToClientOnConnect()
+    public async Task ClientHello_MapsPeerIdToPersistentClientId()
     {
-        // The session token is sent by ServerConnectionMonitor.OnClientConnected,
-        // which fires when _client.Initialize calls CreateClient, triggering FireClientConnected.
-        bool tokenReceived = false;
-        foreach (var (data, _, _, _) in _serverNet.SentPackets)
-        {
-            try
-            {
-                if (MessageSerializer.Deserialize(data) is SessionTokenMessage)
-                {
-                    tokenReceived = true;
-                    break;
-                }
-            }
-            catch { }
-        }
+        SendClientHello(ClientPeerId, ClientAId);
+        await _serverRunner.AwaitIdleFrame();
 
-        AssertThat(tokenReceived).IsTrue();
+        AssertThat(_monitor.GetClientPersistentId(ClientPeerId))
+            .OverrideFailureMessage(
+                $"server should have recorded the hello mapping peer {ClientPeerId} → {ClientAId}; " +
+                $"got {_monitor.GetClientPersistentId(ClientPeerId) ?? "<null>"}")
+            .IsEqual(ClientAId);
     }
 
     // R-02 ─────────────────────────────────────────────────────────────────────
@@ -101,6 +110,7 @@ public class EntityRetentionTests
     {
         _monitor.ManualDisconnectMode = DisconnectEntityMode.RemoveEntity;
 
+        SendClientHello(ClientPeerId, ClientAId);
         SpawnEntityForClient(ClientPeerId);
         await _serverRunner.AwaitIdleFrame();
         int countBefore = EntitySpawner.Instance.Entities.Count;
@@ -119,6 +129,7 @@ public class EntityRetentionTests
     {
         _monitor.ManualDisconnectMode = DisconnectEntityMode.KeepEntity;
 
+        SendClientHello(ClientPeerId, ClientAId);
         SpawnEntityForClient(ClientPeerId);
         await _serverRunner.AwaitIdleFrame();
         int countBefore = EntitySpawner.Instance.Entities.Count;
@@ -136,56 +147,62 @@ public class EntityRetentionTests
         bool allOrphaned = EntitySpawner.Instance.Entities
             .All(e => e.Authority != ClientPeerId);
         AssertThat(allOrphaned).IsTrue();
+
+        // And the reclaim entry must exist, keyed by the persistent id.
+        AssertThat(_monitor.HasPendingReclaimFor(ClientAId))
+            .OverrideFailureMessage($"server should hold a reclaim entry for [cid:{ClientPersistentIdentity.Tail(ClientAId)}] after KeepEntity disconnect")
+            .IsTrue();
     }
 
     // R-04 ─────────────────────────────────────────────────────────────────────
+    // The headline behaviour: a reconnect with the SAME persistent client id
+    // recovers Authority of the previously-orphaned entity without the
+    // client ever sending a separate reclaim message.
     [TestCase]
-    public async Task ReclaimToken_RestoredAfterManualDisconnect()
+    public async Task Reclaim_OnRehello_RestoresAuthorityToReconnectingPeer()
     {
         _monitor.ManualDisconnectMode = DisconnectEntityMode.KeepEntity;
 
-        // Spawn entity and capture its ID
+        SendClientHello(ClientPeerId, ClientAId);
         SpawnEntityForClient(ClientPeerId);
         await _serverRunner.AwaitIdleFrame();
         AssertThat(EntitySpawner.Instance.Entities.Count).IsGreaterEqual(1);
         int entityId = EntitySpawner.Instance.Entities[0].EntityId;
 
-        // Disconnect voluntarily — entity is orphaned, token stored server-side
+        // Disconnect — entity orphaned + parked under ClientAId.
         SendDisconnectNotification(ClientPeerId);
         _serverNet.FireClientDisconnected(ClientPeerId);
         await _serverRunner.AwaitIdleFrame();
+        AssertThat(_monitor.HasPendingReclaimFor(ClientAId)).IsTrue();
 
-        // Simulate reconnect: new peer ID 3 connects; the client EntityManager received
-        // the session token (for peer 2) during initial connection and saved it as _reclaimToken
-        // in OnServerDisconnected. Now NetworkReady fires for the reconnected client,
-        // which sends ReclaimEntityMessage with the old token.
-        // We simulate this by delivering the reclaim message directly from peer 3.
-        string savedToken = GetSavedReclaimToken();
-        AssertThat(savedToken).IsNotNull();
-
-        int newPeerId = 3;
+        // Reconnect under a new peer id and re-hello with the SAME persistent
+        // client id — server should reassign Authority automatically.
+        const int newPeerId = 3;
         _serverNet.FireClientConnected(newPeerId);
         await _serverRunner.AwaitIdleFrame();
-
-        var reclaimMsg = new ReclaimEntityMessage { Token = savedToken };
-        _serverNet.SimulateIncomingPacket(newPeerId, MessageSerializer.Serialize(reclaimMsg));
+        SendClientHello(newPeerId, ClientAId);
         await _serverRunner.AwaitIdleFrame();
 
-        // Entity authority must now belong to the reconnected peer
         var entity = EntitySpawner.Instance.Entities.FirstOrDefault(e => e.EntityId == entityId);
         AssertThat(entity).IsNotNull();
         AssertThat(entity!.Authority).IsEqual(newPeerId);
+
+        // The entry was consumed by the lookup — server no longer holds it.
+        AssertThat(_monitor.HasPendingReclaimFor(ClientAId))
+            .OverrideFailureMessage("reclaim entry must be consumed once the hello reassigns Authority")
+            .IsFalse();
     }
 
     // R-05 ─────────────────────────────────────────────────────────────────────
     // ENet (not the monitor) detects client timeouts and fires PeerDisconnected.
-    // A timeout-induced disconnect arrives at OnClientDisconnected without a prior
+    // A timeout-induced disconnect arrives without a prior
     // DisconnectNotificationMessage, so the monitor applies TimeoutDisconnectMode.
     [TestCase]
     public async Task TimeoutDisconnect_KeepEntityMode_OrphansEntities()
     {
         _monitor.TimeoutDisconnectMode = DisconnectEntityMode.KeepEntity;
 
+        SendClientHello(ClientPeerId, ClientAId);
         SpawnEntityForClient(ClientPeerId);
         await _serverRunner.AwaitIdleFrame();
         int countBefore = EntitySpawner.Instance.Entities.Count;
@@ -195,62 +212,78 @@ public class EntityRetentionTests
         _serverNet.FireClientDisconnected(ClientPeerId);
         await _serverRunner.AwaitIdleFrame();
 
-        // Entity stays alive, orphaned
         int countAfter = EntitySpawner.Instance.Entities.Count;
         AssertThat(countAfter).IsEqual(countBefore);
 
         bool allOrphaned = EntitySpawner.Instance.Entities.All(e => e.Authority != ClientPeerId);
         AssertThat(allOrphaned).IsTrue();
+        AssertThat(_monitor.HasPendingReclaimFor(ClientAId)).IsTrue();
     }
 
     // R-06 ─────────────────────────────────────────────────────────────────────
+    // A hello with an unknown persistent client id MUST NOT silently
+    // hijack any other client's entities; it just registers the mapping
+    // (subsequent disconnect would park an empty reclaim entry, no harm).
     [TestCase]
-    public async Task ReclaimToken_Invalid_IsIgnored()
+    public async Task Hello_UnknownClientId_DoesNotTakeAnyEntity()
     {
+        SendClientHello(ClientPeerId, ClientAId);
         SpawnEntityForClient(ClientPeerId);
         await _serverRunner.AwaitIdleFrame();
         int originalAuthority = EntitySpawner.Instance.Entities[0].Authority;
 
-        var fakeReclaim = new ReclaimEntityMessage { Token = "not-a-real-token" };
-        _serverNet.SimulateIncomingPacket(ClientPeerId, MessageSerializer.Serialize(fakeReclaim));
+        const int innocentPeerId = 4;
+        _serverNet.FireClientConnected(innocentPeerId);
+        await _serverRunner.AwaitIdleFrame();
+        SendClientHello(innocentPeerId, "never-seen-this-before");
         await _serverRunner.AwaitIdleFrame();
 
-        // Authority unchanged
-        AssertThat(EntitySpawner.Instance.Entities[0].Authority).IsEqual(originalAuthority);
+        AssertThat(EntitySpawner.Instance.Entities[0].Authority)
+            .OverrideFailureMessage("a hello with a fresh client id must not touch any other entity's Authority")
+            .IsEqual(originalAuthority);
     }
 
     // R-07 ─────────────────────────────────────────────────────────────────────
+    // Reusable identity contract: the SAME persistent client id can
+    // disconnect/reconnect multiple times in succession, reclaiming on
+    // each cycle. The old design (one-shot server-issued token consumed
+    // on first reclaim) is explicitly NOT this — the new lookup-keyed
+    // design must support repeated reclaim from the same identity.
     [TestCase]
-    public async Task ReclaimToken_SingleUse_SecondAttemptFails()
+    public async Task Reclaim_LookupIsReusableAcrossManyReconnects()
     {
         _monitor.ManualDisconnectMode = DisconnectEntityMode.KeepEntity;
 
+        SendClientHello(ClientPeerId, ClientAId);
         SpawnEntityForClient(ClientPeerId);
         await _serverRunner.AwaitIdleFrame();
         int entityId = EntitySpawner.Instance.Entities[0].EntityId;
 
+        // Cycle 1: disconnect → reconnect under peer 3 → entity reassigned
         SendDisconnectNotification(ClientPeerId);
         _serverNet.FireClientDisconnected(ClientPeerId);
         await _serverRunner.AwaitIdleFrame();
+        const int peer1 = 3;
+        _serverNet.FireClientConnected(peer1);
+        await _serverRunner.AwaitIdleFrame();
+        SendClientHello(peer1, ClientAId);
+        await _serverRunner.AwaitIdleFrame();
+        AssertThat(EntitySpawner.Instance.Entities.First(e => e.EntityId == entityId).Authority)
+            .IsEqual(peer1);
 
-        string token = GetSavedReclaimToken();
-        AssertThat(token).IsNotNull();
-
-        // First reclaim succeeds
-        int newPeerId = 3;
-        _serverNet.FireClientConnected(newPeerId);
+        // Cycle 2: same identity disconnects again and reconnects under
+        // yet another peer id — reclaim must succeed a second time.
+        SendDisconnectNotification(peer1);
+        _serverNet.FireClientDisconnected(peer1);
         await _serverRunner.AwaitIdleFrame();
-        _serverNet.SimulateIncomingPacket(newPeerId, MessageSerializer.Serialize(new ReclaimEntityMessage { Token = token }));
+        const int peer2 = 4;
+        _serverNet.FireClientConnected(peer2);
         await _serverRunner.AwaitIdleFrame();
-        AssertThat(EntitySpawner.Instance.Entities.First(e => e.EntityId == entityId).Authority).IsEqual(newPeerId);
-
-        // Second reclaim with same token must do nothing (token consumed)
-        int anotherPeerId = 4;
-        _serverNet.FireClientConnected(anotherPeerId);
+        SendClientHello(peer2, ClientAId);
         await _serverRunner.AwaitIdleFrame();
-        _serverNet.SimulateIncomingPacket(anotherPeerId, MessageSerializer.Serialize(new ReclaimEntityMessage { Token = token }));
-        await _serverRunner.AwaitIdleFrame();
-        AssertThat(EntitySpawner.Instance.Entities.First(e => e.EntityId == entityId).Authority).IsEqual(newPeerId);
+        AssertThat(EntitySpawner.Instance.Entities.First(e => e.EntityId == entityId).Authority)
+            .OverrideFailureMessage("same persistent client id must be able to reclaim across MANY reconnect cycles")
+            .IsEqual(peer2);
     }
 
     // R-08 ─────────────────────────────────────────────────────────────────────
@@ -262,6 +295,7 @@ public class EntityRetentionTests
         var fakeClock = new FakeTimestampProvider();
         _monitor.TimestampProvider = fakeClock;
 
+        SendClientHello(ClientPeerId, ClientAId);
         SpawnEntityForClient(ClientPeerId);
         await _serverRunner.AwaitIdleFrame();
         int entityId = EntitySpawner.Instance.Entities[0].EntityId;
@@ -269,60 +303,57 @@ public class EntityRetentionTests
         SendDisconnectNotification(ClientPeerId);
         _serverNet.FireClientDisconnected(ClientPeerId);
         await _serverRunner.AwaitIdleFrame();
+        AssertThat(_monitor.HasPendingReclaimFor(ClientAId)).IsTrue();
 
-        string token = GetSavedReclaimToken();
-        AssertThat(token).IsNotNull();
-
-        // Just before expiry — token still valid (sweep does nothing).
+        // Just before expiry — entry still valid (sweep does nothing).
         fakeClock.AdvanceBy(29_000);
         _server!.EmitSignal(ServerManager.SignalName.ServerNetworkTick, 1);
         await _serverRunner.AwaitIdleFrame();
 
         bool entityStillExists = EntitySpawner.Instance.Entities.Any(e => e.EntityId == entityId);
         AssertThat(entityStillExists)
-            .OverrideFailureMessage("Entity destroyed before expiry").IsTrue();
+            .OverrideFailureMessage("entity destroyed before expiry").IsTrue();
 
-        // Past expiry — sweep should drop the token and destroy the orphaned entity.
+        // Past expiry — sweep should drop the entry and destroy the orphaned entity.
         fakeClock.AdvanceBy(2_000); // total 31s, past the 30s threshold
         _server.EmitSignal(ServerManager.SignalName.ServerNetworkTick, 2);
         await _serverRunner.AwaitIdleFrame();
 
-        AssertThat(_monitor.ConsumeReclaimToken(token))
-            .OverrideFailureMessage("Token should be expired and removed").IsNull();
+        AssertThat(_monitor.HasPendingReclaimFor(ClientAId))
+            .OverrideFailureMessage("reclaim entry should have expired and been removed").IsFalse();
         bool entityRemoved = !EntitySpawner.Instance.Entities.Any(e => e.EntityId == entityId);
         AssertThat(entityRemoved)
-            .OverrideFailureMessage("Orphaned entity should have been destroyed by expiry sweep").IsTrue();
+            .OverrideFailureMessage("orphaned entity should have been destroyed by expiry sweep").IsTrue();
     }
 
     // R-09 ─────────────────────────────────────────────────────────────────────
     // Verifies that a reconnecting client receives entities spawned during its outage
     // via the standard OnClientConnected -> SyncWorldState path, not just its own
-    // reclaimed entities. This is a regression guard against any future change that
-    // would skip SyncWorldState when a reclaim is anticipated.
+    // reclaimed entities. Regression guard against any future change that would
+    // skip SyncWorldState when a reclaim is anticipated.
     [TestCase]
     public async Task Reclaim_PostReconnectResyncIncludesEntitiesSpawnedDuringOutage()
     {
         _monitor.ManualDisconnectMode = DisconnectEntityMode.KeepEntity;
 
-        // Client A's entity (will be orphaned)
+        SendClientHello(ClientPeerId, ClientAId);
         SpawnEntityForClient(ClientPeerId);
         await _serverRunner.AwaitIdleFrame();
         int aEntityId = EntitySpawner.Instance.Entities[0].EntityId;
 
-        // Client A disconnects with KeepEntity → entity orphaned, token stored
+        // Client A disconnects with KeepEntity → entity orphaned, entry parked under ClientAId.
         SendDisconnectNotification(ClientPeerId);
         _serverNet.FireClientDisconnected(ClientPeerId);
         await _serverRunner.AwaitIdleFrame();
 
         // While A is gone, the server spawns another entity (e.g. a ball, a global prop)
-        ServerManager.Instance.SpawnEntity<Godot.Node3D>(entityType: 0, authority: 0);
+        ServerManager.Instance.SpawnEntity<Godot.Node3D>(entityType: 1, authority: 0);
         await _serverRunner.AwaitIdleFrame();
-        // The new entity is the most recently added one in the spawner's Entities list.
         int newEntityId = EntitySpawner.Instance.Entities.Last().EntityId;
         AssertThat(newEntityId).IsNotEqual(aEntityId);
 
         // Client A reconnects under a new peer id
-        int newPeerId = 3;
+        const int newPeerId = 3;
         int packetCountBefore = _serverNet.SentPackets.Count;
         _serverNet.FireClientConnected(newPeerId);
         await _serverRunner.AwaitIdleFrame();
@@ -348,58 +379,22 @@ public class EntityRetentionTests
             catch { }
         }
         AssertThat(sawNewEntityCreated)
-            .OverrideFailureMessage("Reconnecting client did not receive Created event for entity spawned during outage").IsTrue();
+            .OverrideFailureMessage("reconnecting client did not receive Created event for entity spawned during outage").IsTrue();
         AssertThat(sawOrphanedEntityCreated)
-            .OverrideFailureMessage("Reconnecting client did not receive Created event for its orphaned entity").IsTrue();
-    }
-
-    // R-10 ─────────────────────────────────────────────────────────────────────
-    // The reclaim token is stored statically on ClientEntityManager so it survives
-    // MonkeNetManager.CreateClient disposing the previous ClientManager and OnConnectionLost
-    // reloading the scene. Without this persistence, the freshly-instantiated
-    // ClientEntityManager has no token to send on its next OnNetworkReady, and the
-    // server-side reclaim entry expires unused.
-    [TestCase]
-    public async Task ReclaimToken_PersistsAcrossClientManagerTeardown()
-    {
-        AssertThat(MonkeNet.Client.ClientEntityManager.HasSavedReclaimToken)
-            .OverrideFailureMessage("Static reclaim token leaked from a prior test").IsFalse();
-
-        // Deliver a SessionTokenMessage to the client (mimics ServerConnectionMonitor
-        // sending one on connect). ClientEntityManager.OnCommandReceived stores it as _sessionToken.
-        const string sessionToken = "test-reclaim-token-r10";
-        _clientNet.SimulateIncomingPacket(1, MessageSerializer.Serialize(
-            new SessionTokenMessage { Token = sessionToken }));
-        await _clientRunner.AwaitIdleFrame();
-
-        // Static is still empty — the move into the static happens on disconnect, not connect.
-        AssertThat(MonkeNet.Client.ClientEntityManager.HasSavedReclaimToken).IsFalse();
-
-        // Trigger the client-side disconnect path. ClientManager.OnPeerDisconnected emits
-        // ServerDisconnectedInternal → ClientEntityManager.OnServerDisconnected moves
-        // _sessionToken into the static _persistentReclaimToken.
-        _clientNet.SimulateServerDisconnected();
-        await _clientRunner.AwaitIdleFrame();
-
-        AssertThat(MonkeNet.Client.ClientEntityManager.HasSavedReclaimToken)
-            .OverrideFailureMessage("OnServerDisconnected did not save the session token").IsTrue();
-
-        // Tear down the ClientManager (and its child ClientEntityManager). This is what
-        // MonkeNetManager.CreateClient does when the user clicks Reconnect.
-        _clientRunner.Dispose();
-        _clientRunner = null;
-
-        // The token must still be accessible — a freshly-instantiated ClientEntityManager
-        // will read it on its next OnNetworkReady and emit a ReclaimEntityMessage.
-        AssertThat(MonkeNet.Client.ClientEntityManager.HasSavedReclaimToken)
-            .OverrideFailureMessage("Reclaim token was lost when ClientManager was disposed").IsTrue();
+            .OverrideFailureMessage("reconnecting client did not receive Created event for its orphaned entity").IsTrue();
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
+    private void SendClientHello(int peerId, string persistentClientId)
+    {
+        var msg = new ClientHelloMessage { ClientId = persistentClientId };
+        _serverNet.SimulateIncomingPacket(peerId, MessageSerializer.Serialize(msg));
+    }
+
     private void SpawnEntityForClient(int clientId)
     {
-        var req = new EntityRequestMessage { EntityType = 0 };
+        var req = new EntityRequestMessage { EntityType = 1 };
         _serverNet.SimulateIncomingPacket(clientId, MessageSerializer.Serialize(req));
     }
 
@@ -407,25 +402,6 @@ public class EntityRetentionTests
     {
         var msg = new DisconnectNotificationMessage();
         _serverNet.SimulateIncomingPacket(clientId, MessageSerializer.Serialize(msg));
-    }
-
-    private string GetSavedReclaimToken()
-    {
-        // The token lives in _monitor._reclaimableEntities. We access it via
-        // ConsumeReclaimToken to find any entry, then put it back by re-adding.
-        // Instead, we scan _serverNet.SentPackets for the SessionTokenMessage sent
-        // to ClientPeerId at connection time and use that string directly.
-        foreach (var (data, id, _, _) in _serverNet.SentPackets)
-        {
-            if (id != ClientPeerId) continue;
-            try
-            {
-                if (MessageSerializer.Deserialize(data) is SessionTokenMessage tokenMsg)
-                    return tokenMsg.Token;
-            }
-            catch { }
-        }
-        return null;
     }
 
     private void ClearSpawnedEntities()

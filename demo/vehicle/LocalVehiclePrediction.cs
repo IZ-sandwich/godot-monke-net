@@ -18,16 +18,17 @@ public partial class LocalVehiclePrediction : ClientPredictedEntity
     // momentum — the wrong velocity writes new wrong positions every tick until the
     // position threshold trips and a hard snap fires.
     [Export] private float _maxVelocityDeviationSquared = 0.25f;
-    // Per-snapshot fraction of accumulated drift to absorb when below the hard reconcile
-    // threshold. 0 disables soft correction; 1 would full-snap every snapshot. 0.1 gives a
-    // ~7-snapshot half-life: at 30 Hz snapshots, drift converges to zero in ~230 ms without
-    // a visible jump. Position is corrected by relative shift (preserves momentum); velocity
-    // and rotation are slerped toward authoritative.
-    [Export] private float _softCorrectionBlend = 0.1f;
+    // Rotation divergence threshold (degrees). See LocalRigidPropPrediction for rationale.
+    [Export] private float _maxRotationDeviationDegrees = 5f;
     [Export] private PredictionRigidbody3D _predictionRb;
 
     public override void OnProcessTick(int tick, IPackableElement input)
     {
+        // ClientPredictionManager.Predict() routes the correct input per entity:
+        // the driver gets fresh local input; observers get the input the server
+        // last forwarded for this vehicle. So we can apply vehicle physics for
+        // any client and the resulting motion matches the server modulo cross-
+        // process Jolt drift.
         if (input is CharacterInputMessage cmd)
             VehiclePhysics.AdvancePhysics(_predictionRb, cmd);
     }
@@ -45,6 +46,8 @@ public partial class LocalVehiclePrediction : ClientPredictedEntity
         if ((state.Position - savedState.Position).LengthSquared() > _maxDeviationAllowedSquared)
             return true;
         if ((state.Velocity - savedState.LinearVelocity).LengthSquared() > _maxVelocityDeviationSquared)
+            return true;
+        if (state.Rotation.AngleTo(savedState.Rotation) > Mathf.DegToRad(_maxRotationDeviationDegrees))
             return true;
         return false;
     }
@@ -64,31 +67,11 @@ public partial class LocalVehiclePrediction : ClientPredictedEntity
 
     public override void ResimulateTick(IPackableElement input)
     {
+        // Rollback resim receives per-entity input from ClientPredictionManager;
+        // apply it for both driver and observers so the resim trajectory matches.
         if (input is CharacterInputMessage cmd)
             VehiclePhysics.AdvancePhysics(_predictionRb, cmd);
     }
 
-    public override void ApplySoftCorrection(IEntityStateData receivedState, RigidbodyState savedStateAtTick)
-    {
-        if (_softCorrectionBlend <= 0f) return;
-        var state = (EntityStateMessage)receivedState;
-
-        // Visual-only nudge toward authoritative. We deliberately do NOT mutate body state
-        // here. Mutating body.GlobalPosition every snapshot invalidates Jolt's persistent
-        // contact cache and triggers depenetration on the next step — itself non-deterministic
-        // across processes — which causes more drift than the correction removes.
-        // We also do NOT correct velocity, angular velocity, or rotation: the snapshot
-        // carries tick-T values (in the past) while the body is at tick T+latency on a
-        // different part of the dynamics curve, and lerping toward stale values pulls the
-        // body backward in time. The visual offset uses the error DIFF (not absolute target),
-        // which preserves momentum.
-        // No-op when no smoother is wired (sphere meshes, props that don't need a separate
-        // visual root). The hard reconcile threshold + snap-then-smooth still catches drift.
-        var smoothing = _predictionRb.Smoothing;
-        Vector3 posError = savedStateAtTick.Position - state.Position;
-        Vector3 visualShift = -posError * _softCorrectionBlend;
-        MonkeLogger.Debug($"[PRED-SOFT] LocalVehicle eid={EntityId} posError=({posError.X:F4},{posError.Y:F4},{posError.Z:F4}) blend={_softCorrectionBlend} visualShift=({visualShift.X:F4},{visualShift.Y:F4},{visualShift.Z:F4}) smootherWired={(smoothing != null)}");
-        if (smoothing == null) return;
-        smoothing.AddDriftCorrection(visualShift);
-    }
+    public override void RestoreBodyState(RigidbodyState state) => _predictionRb.Reconcile(state);
 }

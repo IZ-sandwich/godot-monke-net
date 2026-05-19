@@ -87,7 +87,7 @@ public class EntityCleanupTests
         // Spawn two entities owned by client 2 by sending EntityRequest from that client
         for (int i = 0; i < 2; i++)
         {
-            var req = new EntityRequestMessage { EntityType = 0 };
+            var req = new EntityRequestMessage { EntityType = 1 };
             _serverNet.SimulateIncomingPacket(2, MessageSerializer.Serialize(req));
             await _serverRunner.AwaitIdleFrame();
         }
@@ -120,7 +120,7 @@ public class EntityCleanupTests
         _serverNet.FireClientConnected(peerId: 3);
         await _serverRunner.AwaitIdleFrame();
 
-        var req3 = new EntityRequestMessage { EntityType = 0 };
+        var req3 = new EntityRequestMessage { EntityType = 1 };
         _serverNet.SimulateIncomingPacket(3, MessageSerializer.Serialize(req3));
         await _serverRunner.AwaitIdleFrame();
 
@@ -146,7 +146,7 @@ public class EntityCleanupTests
             {
                 Event = EntityEventEnum.Created,
                 EntityId = i,
-                EntityType = 0,
+                EntityType = 1,
                 Authority = _client.GetNetworkId(),
                 Position = Godot.Vector3.Zero,
                 Yaw = 0f,
@@ -171,7 +171,7 @@ public class EntityCleanupTests
         // Spawn 2 server entities via EntityRequest from peer 2
         for (int i = 0; i < 2; i++)
         {
-            var req = new EntityRequestMessage { EntityType = 0 };
+            var req = new EntityRequestMessage { EntityType = 1 };
             _serverNet.SimulateIncomingPacket(2, MessageSerializer.Serialize(req));
             await _serverRunner.AwaitIdleFrame();
         }
@@ -203,7 +203,7 @@ public class EntityCleanupTests
         {
             Event = EntityEventEnum.Created,
             EntityId = 55,
-            EntityType = 0,
+            EntityType = 1,
             Authority = _client.GetNetworkId(),
             Position = Godot.Vector3.Zero,
             Yaw = 0f,

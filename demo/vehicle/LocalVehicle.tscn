@@ -19,7 +19,6 @@ collision_layer = 2
 collision_mask = 3
 
 [node name="VisualRoot" type="Node3D" parent="." unique_id=1602080612]
-top_level = true
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="VisualRoot" unique_id=683380210]
 mesh = SubResource("BoxMesh_veh")

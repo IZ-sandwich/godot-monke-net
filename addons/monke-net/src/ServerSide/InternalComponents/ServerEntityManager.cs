@@ -53,54 +53,129 @@ public partial class ServerEntityManager : InternalServerComponent
             SpawnEntity<Node3D>(entityRequest.EntityType, clientId);
         }
 
-        if (command is ReclaimEntityMessage reclaimMsg)
-        {
-            var monitor = GetParent().GetNode<ServerConnectionMonitor>("ServerConnectionMonitor");
-            var entityIds = monitor.ConsumeReclaimToken(reclaimMsg.Token);
-            if (entityIds == null) return;
-
-            foreach (int entityId in entityIds)
-            {
-                var entity = _entitySpawner.Entities.Find(e => e.EntityId == entityId);
-                if (entity == null || entity.Authority != 0) continue;
-                ChangeAuthority(entityId, clientId);
-                MonkeLogger.Info($"ServerEntityManager: entity {entityId} reclaimed by client {clientId}");
-            }
-        }
+        // Reclaim is no longer client-initiated: ServerConnectionMonitor now
+        // owns the lookup, keyed by the client's persistent identity
+        // (announced via ClientHelloMessage and surviving disconnect /
+        // reconnect / process restart). On hello, the monitor reassigns
+        // Authority directly through ChangeAuthority.
 
         if (command is OwnershipChangeRequestMessage ownershipReq)
         {
             HandleOwnershipRequest(clientId, ownershipReq.EntityId);
         }
+
+        if (command is ReleaseAuthorityMessage releaseReq)
+        {
+            HandleReleaseRequest(clientId, releaseReq.EntityId);
+        }
+    }
+
+    /// <summary>Look up a server-side entity by id, or null if it doesn't
+    /// exist (e.g. it was just destroyed by another path). Used by
+    /// <c>ServerConnectionMonitor</c>'s reclaim flow and by anything else
+    /// that needs to inspect an entity without iterating the full list.</summary>
+    public NetworkBehaviour FindEntityById(int entityId) =>
+        _entitySpawner.Entities.Find(e => e.EntityId == entityId);
+
+    private void HandleReleaseRequest(int requesterId, int entityId)
+    {
+        var entity = _entitySpawner.Entities.Find(e => e.EntityId == entityId);
+        if (entity == null || entity.Authority != requesterId)
+        {
+            MonkeLogger.Debug($"HandleReleaseRequest: ignoring release from client {requesterId} for entity {entityId} (entity null or not owner)");
+            return;
+        }
+        var policy = MonkeNetConfig.Instance?.GetSpawnConfigurationForEntityType(entity.EntityType)?.OwnershipPolicy;
+        if (policy != null && !policy.AllowOwnerRelease)
+        {
+            MonkeLogger.Debug($"HandleReleaseRequest: policy denies owner-release for entity type {entity.EntityType}");
+            return;
+        }
+        ChangeAuthority(entityId, 0);
     }
 
     private void HandleOwnershipRequest(int requesterId, int entityId)
     {
         var entity = _entitySpawner.Entities.Find(e => e.EntityId == entityId);
-        // Reject silently if entity doesn't exist — the requester gets a rejection so
-        // any anticipated client flip can revert. We don't log at warn level because
-        // a stale request from a client that just saw an entity destroyed is normal.
-        bool approved = entity != null
-                        && OwnershipApprover != null
-                        && OwnershipApprover(requesterId, entityId);
+        // Reject silently if entity doesn't exist — a stale request from a client that
+        // just saw the entity destroyed is normal, not a misbehavior to warn about.
+        if (entity == null)
+        {
+            SendRejection(requesterId, entityId);
+            return;
+        }
 
-        if (approved)
+        if (!EvaluatePolicy(entity, requesterId))
         {
-            ChangeAuthority(entityId, requesterId);
+            SendRejection(requesterId, entityId);
+            return;
         }
-        else
+
+        // Custom approver runs as a final gate after the declarative policy. Lets games
+        // express predicates not expressible in OwnershipPolicy (e.g. "requester holds
+        // a key"). A null approver passes through — pure policy-driven decisions don't
+        // need it.
+        if (OwnershipApprover != null && !OwnershipApprover(requesterId, entityId))
         {
-            SendCommandToClient(requesterId, new OwnershipChangeRejectedMessage { EntityId = entityId },
-                INetworkManager.PacketModeEnum.Reliable, (int)ChannelEnum.GameReliable);
+            SendRejection(requesterId, entityId);
+            return;
         }
+
+        ChangeAuthority(entityId, requesterId);
+    }
+
+    private bool EvaluatePolicy(NetworkBehaviour entity, int requesterId)
+    {
+        var config = MonkeNetConfig.Instance?.GetSpawnConfigurationForEntityType(entity.EntityType);
+        var policy = config?.OwnershipPolicy;
+        if (policy == null)
+        {
+            // No policy configured = the entity type opts out of client-initiated claims.
+            // Server-side ChangeAuthority calls (e.g. demo's vehicle-reclaim on disconnect)
+            // still work; this only gates the request path.
+            return false;
+        }
+
+        if (policy.RequireUnowned && entity.Authority != 0)
+            return false;
+
+        if (policy.MaxRequesterDistance > 0f)
+        {
+            var entityRoot = _entitySpawner.GetEntityRoot(entity);
+            if (entityRoot == null) return false;
+            Vector3 entityPos = entityRoot.GlobalPosition;
+
+            float maxSq = policy.MaxRequesterDistance * policy.MaxRequesterDistance;
+            bool anyInRange = false;
+            foreach (int ownedId in _entitySpawner.GetAllEntitiesByAuthority(requesterId))
+            {
+                var ownedEntity = _entitySpawner.Entities.Find(e => e.EntityId == ownedId);
+                var ownedRoot = ownedEntity != null ? _entitySpawner.GetEntityRoot(ownedEntity) : null;
+                if (ownedRoot == null) continue;
+                if (ownedRoot.GlobalPosition.DistanceSquaredTo(entityPos) <= maxSq)
+                {
+                    anyInRange = true;
+                    break;
+                }
+            }
+            if (!anyInRange) return false;
+        }
+
+        return true;
+    }
+
+    private static void SendRejection(int requesterId, int entityId)
+    {
+        SendCommandToClient(requesterId, new OwnershipChangeRejectedMessage { EntityId = entityId },
+            INetworkManager.PacketModeEnum.Reliable, (int)ChannelEnum.GameReliable);
     }
 
     /// <summary>
     /// Reassigns ownership of a server-authoritative entity. Mutates the entity's Authority
-    /// in place and notifies the old and new owner clients so their local representations
-    /// swap between the predicted (LocalScene) and interpolated (DummyScene) views. Other
-    /// clients are not notified — their dummy view is correct regardless of which peer owns
-    /// the entity. <paramref name="newAuthority"/> = 0 means the server reclaims ownership.
+    /// in place and broadcasts <see cref="AuthorityChangedMessage"/> so every client updates
+    /// its local <c>entity.Authority</c> field. No scene swap, no rigid-body state loss —
+    /// the same client-side scene instance keeps simulating; only input routing changes.
+    /// <paramref name="newAuthority"/> = 0 means the server reclaims ownership.
     /// </summary>
     public void ChangeAuthority(int entityId, int newAuthority)
     {
@@ -115,41 +190,12 @@ public partial class ServerEntityManager : InternalServerComponent
         if (oldAuthority == newAuthority) return;
 
         entity.Authority = newAuthority;
-        var entityRoot = _entitySpawner.GetEntityRoot(entity);
-        Vector3 pos = entityRoot?.GlobalPosition ?? Vector3.Zero;
-        float yaw = entityRoot?.GlobalRotation.Y ?? 0f;
 
-        // Send Destroy + Create to the old owner (so they swap from Local to Dummy) and to
-        // the new owner (so they swap from Dummy to Local). authority == 0 is the server
-        // itself, which has no client-side view to swap.
-        if (oldAuthority != 0)
-            SendDestroyCreatePair(oldAuthority, entity, newAuthority, pos, yaw);
-        if (newAuthority != 0)
-            SendDestroyCreatePair(newAuthority, entity, newAuthority, pos, yaw);
+        SendCommandToClient((int)NetworkManagerEnet.AudienceMode.Broadcast,
+            new AuthorityChangedMessage { EntityId = entityId, NewAuthority = newAuthority },
+            INetworkManager.PacketModeEnum.Reliable, (int)ChannelEnum.EntityEvent);
 
         MonkeLogger.Info($"ChangeAuthority: entity {entityId} authority {oldAuthority} -> {newAuthority}");
-    }
-
-    private static void SendDestroyCreatePair(int targetClientId, NetworkBehaviour entity, int newAuthority, Vector3 pos, float yaw)
-    {
-        SendCommandToClient(targetClientId, new EntityEventMessage
-        {
-            Event = EntityEventEnum.Destroyed,
-            EntityId = entity.EntityId,
-            EntityType = entity.EntityType,
-            Authority = 0,
-            Metadata = entity.Metadata,
-        }, INetworkManager.PacketModeEnum.Reliable, (int)ChannelEnum.EntityEvent);
-        SendCommandToClient(targetClientId, new EntityEventMessage
-        {
-            Event = EntityEventEnum.Created,
-            EntityId = entity.EntityId,
-            EntityType = entity.EntityType,
-            Authority = newAuthority,
-            Position = pos,
-            Yaw = yaw,
-            Metadata = entity.Metadata,
-        }, INetworkManager.PacketModeEnum.Reliable, (int)ChannelEnum.EntityEvent);
     }
 
     protected override void OnClientConnected(int clientId)
@@ -213,10 +259,26 @@ public partial class ServerEntityManager : InternalServerComponent
             States = new IEntityStateData[entityCount]
         };
 
+        // Include per-entity inputs so observers can drive their local prediction
+        // of entities they don't own with the same input the server applied. The
+        // ServerInputReceiver lives as a sibling under ServerManager; look it up
+        // once per snapshot rather than caching to keep restart paths simple.
+        var inputReceiver = GetParent().GetNodeOrNull<ServerInputReceiver>("ServerInputReceiver");
+        var inputs = new List<EntityInput>(entityCount);
+
         for (int i = 0; i < entityCount; i++)
         {
             snapshot.States[i] = includedEntities[i].PackEntityState();
+            if (inputReceiver != null)
+            {
+                var lastInput = inputReceiver.GetLastInputFor(includedEntities[i]);
+                if (lastInput != null)
+                {
+                    inputs.Add(new EntityInput { EntityId = includedEntities[i].EntityId, Input = lastInput });
+                }
+            }
         }
+        snapshot.Inputs = inputs.ToArray();
 
         return snapshot;
     }

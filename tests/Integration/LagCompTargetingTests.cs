@@ -74,7 +74,7 @@ public class LagCompTargetingTests
     [TestCase]
     public async Task LagComp_RaycastAtPastTickHitsAtPastPose()
     {
-        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 0, authority: 0);
+        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 1, authority: 0);
 
         // The spawn process runs OnEntitySpawned hooks that may move the body.
         // Wait for spawn-time logic to finish, THEN set the position we want
@@ -82,13 +82,11 @@ public class LagCompTargetingTests
         await _serverRunner.AwaitIdleFrame();
         var entityRoot = EntitySpawner.Instance.GetEntityRoot(EntitySpawner.Instance.Entities[0])!;
 
-        // Player scene's collision capsule is offset (0, 1, 0) from the body
-        // root, so the capsule occupies y ∈ [body.y, body.y + 2]. Place the
-        // body at y=0 for clarity but aim the ray at y=1 (capsule center) so
-        // the ray solidly passes through the shape rather than grazing its
-        // bottom cap (where Jolt's edge-case handling may miss).
+        // Ball is a sphere at the body's origin, so aim the ray at y=0 (the sphere
+        // center) rather than the capsule-center offset the old CharacterPlayer test
+        // used.
         Vector3 pastPos = new(5, 0, 0);
-        Vector3 rayY = new(0, 1, 0);
+        Vector3 rayY = Vector3.Zero;
         entityRoot.GlobalPosition = pastPos;
         await _serverRunner.AwaitIdleFrame();
         await _serverRunner.AwaitIdleFrame();
@@ -108,10 +106,15 @@ public class LagCompTargetingTests
         Vector3 dir = Vector3.Forward;  // (0, 0, -1) — toward target along -Z
         bool hit = _lagComp.RaycastAtTick(rewindTick, origin, dir, length: 10f, out var hitInfo);
 
-        // Body must be restored to current pose after the query, regardless of hit.
-        AssertThat(entityRoot.GlobalPosition)
-            .OverrideFailureMessage($"target was not restored to current pose after rewind: {entityRoot.GlobalPosition}")
-            .IsEqual(new Vector3(100, 0, 0));
+        // Body must be restored to (close to) current pose after the query. Ball is a
+        // rigid body and drifts slightly under gravity each tick, so we tolerate a few
+        // cm of Y drift — the important thing is X/Z weren't reset to the past pose.
+        AssertThat(System.MathF.Abs(entityRoot.GlobalPosition.X - 100f))
+            .OverrideFailureMessage($"target X was not restored to current pose after rewind: {entityRoot.GlobalPosition}")
+            .IsLess(0.1f);
+        AssertThat(System.MathF.Abs(entityRoot.GlobalPosition.Z))
+            .OverrideFailureMessage($"target Z was not restored to current pose after rewind: {entityRoot.GlobalPosition}")
+            .IsLess(0.1f);
 
         // Hard hit assertion. If the demo player scene's collision_layer doesn't
         // satisfy the default raycast (mask=all-layers in LagCompensation.Raycast),
@@ -140,7 +143,7 @@ public class LagCompTargetingTests
     [TestCase]
     public async Task LagComp_BoundaryHandling()
     {
-        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 0, authority: 0);
+        ServerManager.Instance.SpawnEntity<Node3D>(entityType: 1, authority: 0);
         for (int i = 0; i < 30; i++) await _serverRunner.AwaitIdleFrame();
 
         int newest = _lagComp.NewestTick;

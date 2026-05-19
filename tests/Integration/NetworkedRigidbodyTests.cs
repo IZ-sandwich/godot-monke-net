@@ -321,13 +321,16 @@ public class NetworkedRigidbodyTests
             .IsLess(2f);
     }
 
-    // ─── NRB-04: server impulse propagates as a velocity change ───────────────
-    // Apply a horizontal impulse to the server ball via PredictionRigidbody3D — the same
-    // path normal gameplay code uses. After a few snapshots the client dummy's body
-    // velocity should reflect the server's authoritative velocity (DummyBallStateInterpolation
-    // copies LinearVelocity from each new snapshot).
+    // ─── NRB-04: server impulse propagates as a position change ───────────────
+    // Apply a horizontal impulse to the server ball. Under the unified-prediction
+    // model the client predicts the ball locally (no input), so the impulse propagates
+    // through the snapshot-reconcile path: each snapshot the client compares its
+    // predicted state against the server's and pulls position+velocity back when they
+    // diverge beyond LocalRigidPropPrediction's threshold. Position is the more
+    // stable signal across reconcile timing — velocity may briefly read 0 between
+    // reconciles even when the body has been actively repositioned.
     [TestCase(Timeout = 20000)]
-    public async Task NRB04_ServerAppliesImpulse_ClientDummyVelocityReflectsServerOverWire()
+    public async Task NRB04_ServerAppliesImpulse_ClientPositionReflectsServerOverWire()
     {
         await StartAndWaitForReady();
 
@@ -337,33 +340,33 @@ public class NetworkedRigidbodyTests
         bool clientGotIt = await WaitUntil(() => FindClientEntity(entityId) != null, maxFrames: 120);
         AssertThat(clientGotIt).IsTrue();
 
-        // Apply the impulse directly to the body. The PredictionRigidbody3D wrapper queues ops
-        // and only flushes them when Simulate() is called from a per-tick handler — but the
-        // demo's ServerBallStateSyncronizer does not override OnProcessTick (the ball is
-        // passive, with no input pipeline), so the wrapper would never flush the queue here.
-        // ApplyCentralImpulse on the underlying body matches how server-driven physics would
-        // realistically apply external forces to an unowned entity in production code.
         var serverBody = GetRigidBodyOfEntity(serverEntity);
         AssertThat(serverBody)
             .OverrideFailureMessage($"Server-side RigidBody3D not found for entity {entityId}. {DumpEntities()}")
             .IsNotNull();
 
+        float startServerX = serverBody.GlobalPosition.X;
         var kick = new Vector3(8f, 0f, 0f);
         serverBody.ApplyCentralImpulse(kick);
 
-        // Allow several ticks for: server.Simulate → SpaceStep → snapshot → ENet → client interp.
-        await PumpFrames(15);
+        await PumpFrames(30);
 
         var clientBody = GetRigidBodyOfEntity(FindClientEntity(entityId));
         AssertThat(clientBody)
-            .OverrideFailureMessage($"Client dummy RigidBody3D not found for entity {entityId}. {DumpEntities()}")
+            .OverrideFailureMessage($"Client RigidBody3D not found for entity {entityId}. {DumpEntities()}")
             .IsNotNull();
 
-        // Mass=1 → impulse imparts ~8 m/s along +X. Allow generous tolerance for gravity coupling
-        // (Y component will diverge over 15 ticks) and for the dummy's correction blend.
-        AssertThat(clientBody.LinearVelocity.X)
-            .OverrideFailureMessage($"Client dummy velocity X={clientBody.LinearVelocity.X:F3} did not pick up the server's +X impulse (full vel={clientBody.LinearVelocity})")
-            .IsGreater(2f);
+        // After 30 ticks the server ball should have moved several meters along +X.
+        // The client's predicted body, reconciled to server state, should track within
+        // a generous tolerance.
+        float serverDeltaX = serverBody.GlobalPosition.X - startServerX;
+        AssertThat(serverDeltaX)
+            .OverrideFailureMessage($"Server body did not move under impulse (deltaX={serverDeltaX:F3})")
+            .IsGreater(0.5f);
+        float clientServerXDelta = System.MathF.Abs(clientBody.GlobalPosition.X - serverBody.GlobalPosition.X);
+        AssertThat(clientServerXDelta)
+            .OverrideFailureMessage($"Client X={clientBody.GlobalPosition.X:F3} diverges from server X={serverBody.GlobalPosition.X:F3} beyond reconcile envelope")
+            .IsLess(1.0f);
     }
 
     // ─── NRB-05: two-ball collision replicates both post-collision states ─────

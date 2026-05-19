@@ -45,7 +45,8 @@ public class MultiProcessOrchestrator : IDisposable
     }
 
     public TestProcess Spawn(string role, int enetPort, string label = null,
-        string serverAddr = "127.0.0.1", string recordVideoPath = null)
+        string serverAddr = "127.0.0.1", string recordVideoPath = null,
+        string clientPersistentId = null)
     {
         int orchPort = Interlocked.Increment(ref _nextOrchPort);
         label ??= role;
@@ -98,7 +99,19 @@ public class MultiProcessOrchestrator : IDisposable
             $"--orch-port={orchPort}",
             $"--label={label}",
         });
-        if (role == "client") args.Add($"--server-addr={serverAddr}");
+        if (role == "client")
+        {
+            args.Add($"--server-addr={serverAddr}");
+            // Pass an explicit ClientPersistentIdentity per spawned client. If
+            // the caller supplied one (e.g. reconnect-as-same-identity test
+            // that wants to re-spawn a fresh process with the SAME id), use it;
+            // otherwise auto-generate a fresh GUID. Either way the child reads
+            // it directly from --client-id= and writes nothing to user://,
+            // keeping the harness hermetic and not stepping on the developer's
+            // own persistent identity file.
+            string id = clientPersistentId ?? Guid.NewGuid().ToString();
+            args.Add($"--client-id={id}");
+        }
         if (recordVideoPath != null) args.Add($"--record-video={recordVideoPath}");
 
         var psi = new ProcessStartInfo(_godotBin)
@@ -120,6 +133,12 @@ public class MultiProcessOrchestrator : IDisposable
             CreateNoWindow = recordVideoPath == null,
         };
         foreach (var a in args) psi.ArgumentList.Add(a);
+
+        // Tell the demo player's FirstPersonCameraController not to grab the OS
+        // cursor. Without this, a windowed client (recordVideoPath != null) puts
+        // Input.MouseMode = Captured and warps/confines the real mouse to its
+        // window — even when the window is hidden behind others.
+        psi.Environment["MONKENET_TEST"] = "1";
 
         var proc = Process.Start(psi)
             ?? throw new InvalidOperationException($"failed to spawn Godot for role={role}");
