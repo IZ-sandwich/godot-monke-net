@@ -53,6 +53,14 @@ public partial class PredictionVisualSmoothing3D : Node3D
     /// the threshold.</summary>
     [Export] public float TeleportDistance { get; set; } = 5f;
 
+
+    /// <summary>When false, the smoother only manages POSITION offsets and never
+    /// writes the visual's rotation — caller-owned rotation (e.g. a knight rig
+    /// whose Y yaw is driven from camera input every tick) is preserved. Default
+    /// true preserves the original prop/vehicle behaviour where the visual's
+    /// rotation is fully derived from the body.</summary>
+    [Export] public bool SmoothRotation { get; set; } = true;
+
     // World-space position offset between visual and body. Decays toward zero.
     private Vector3 _posOffset;
     // World-space rotation offset: Visual.Quaternion = _rotOffset * Body.Quaternion.
@@ -139,7 +147,19 @@ public partial class PredictionVisualSmoothing3D : Node3D
         // setter, which converts the desired global to local via the parent's
         // current global, so the visual's resulting global rotation is exactly
         // (rotOffset * bodyRot) regardless of parent rotation.
-        Visual.GlobalTransform = new Transform3D(new Basis((_rotOffset * bodyRot).Normalized()), bodyPos + _posOffset);
+        //
+        // SmoothRotation=false skips the rotation write entirely — used when
+        // the visual carries caller-owned rotation (e.g. a knight rig's yaw
+        // driven from camera input every tick) that the smoother must not
+        // overwrite. Only position is offset-corrected.
+        if (SmoothRotation)
+        {
+            Visual.GlobalTransform = new Transform3D(new Basis((_rotOffset * bodyRot).Normalized()), bodyPos + _posOffset);
+        }
+        else
+        {
+            Visual.GlobalPosition = bodyPos + _posOffset;
+        }
 
         _prevBodyPos = bodyPos;
         _prevBodyRot = bodyRot;
@@ -199,7 +219,16 @@ public partial class PredictionVisualSmoothing3D : Node3D
 
         double interpFrac = Engine.GetPhysicsInterpolationFraction();
         ulong physFrame = Engine.GetPhysicsFrames();
-        MonkeLogger.Debug($"[SMOOTH-FRAME] body={Body.Name} pf={physFrame} dt={delta:F5} pif={interpFrac:F3} " +
+        // Snapshot the network-synced tick the HUD would display at this same
+        // _Process call. Tagging SMOOTH-FRAME with it lets downstream plot
+        // tools cross-reference any MP4 frame (which captures the HUD's tick
+        // number) with the visual position the user saw in that frame —
+        // crucial for diagnosing per-tick visual artifacts that vanish when
+        // the data is aggregated by physics-frame counter.
+        int clientTick = MonkeNet.Client.ClientManager.Instance?
+            .GetNodeOrNull<MonkeNet.Client.ClientNetworkClock>("ClientNetworkClock")?
+            .GetCurrentTick() ?? -1;
+        MonkeLogger.Debug($"[SMOOTH-FRAME] body={Body.Name} pf={physFrame} clientTick={clientTick} dt={delta:F5} pif={interpFrac:F3} " +
             $"raw=({bodyPosUninterp.X:F5},{bodyPosUninterp.Y:F5},{bodyPosUninterp.Z:F5}) " +
             $"bodyRot=({bodyRotUninterp.X:F4},{bodyRotUninterp.Y:F4},{bodyRotUninterp.Z:F4},{bodyRotUninterp.W:F4}) " +
             $"bodyFti=({bodyPosFti.X:F5},{bodyPosFti.Y:F5},{bodyPosFti.Z:F5}) bodyFtiSame={bodyFtiSame} " +
@@ -280,28 +309,95 @@ public partial class PredictionVisualSmoothing3D : Node3D
         Quaternion rotJump = (postRot * preRot.Inverse()).Normalized();
         _rotOffset = (_rotOffset * rotJump.Inverse()).Normalized();
 
-        // Cap a runaway offset to a clean teleport, matching the per-frame
-        // TeleportDistance threshold so a multi-meter snap doesn't smear an
-        // unreadable offset across DecayTime.
         if (TeleportDistance > 0f && _posOffset.Length() > TeleportDistance)
         {
             _posOffset = Vector3.Zero;
             _rotOffset = Quaternion.Identity;
         }
 
-        // Baseline the next-frame capture against the POST pose. Without this,
-        // _PhysicsProcess at the next frame would see delta = (postPos -
-        // _prevBodyPos) and re-capture the same jump on top of what we just
-        // absorbed.
         _prevBodyPos = postPos;
         _prevBodyRot = postRot;
         _hasPrev = true;
 
-        // Write Visual immediately so any read between now and the next
-        // _PhysicsProcess sees the absorbed pose, not the body's raw pose.
-        Visual.GlobalTransform = new Transform3D(
-            new Basis((_rotOffset * postRot).Normalized()),
-            postPos + _posOffset);
+        if (SmoothRotation)
+        {
+            Visual.GlobalTransform = new Transform3D(
+                new Basis((_rotOffset * postRot).Normalized()),
+                postPos + _posOffset);
+        }
+        else
+        {
+            Visual.GlobalPosition = postPos + _posOffset;
+        }
+    }
+
+    /// <summary>
+    /// Re-anchor the smoother's POSITION offset against the body's CURRENT
+    /// pose so that <c>Visual = Body + offset</c> evaluates to the supplied
+    /// pre-reconcile visual position. Called by
+    /// <see cref="Client.ClientPredictionManager"/> at the end of
+    /// <c>RollbackAndResimulate</c>, after the resim loop has advanced the
+    /// body from <c>auth_pose</c> through N replayed ticks to
+    /// <c>post_resim_pose</c>.
+    ///
+    /// Why this is load-bearing: <see cref="AbsorbBodyTeleport"/> only sees
+    /// the (prePos, postPos) at the moment of reconcile — i.e. (live_pose,
+    /// auth_pose) — and sizes <c>_posOffset</c> against the auth pose. The
+    /// resim that runs IMMEDIATELY after the reconcile moves the body from
+    /// auth_pose to post_resim_pose, often by several metres (deep rollback
+    /// with velocity / input correction). Without this re-anchor the offset
+    /// is stale by exactly <c>(auth_pose − post_resim_pose)</c>, and the next
+    /// <c>_PhysicsProcess</c> renders <c>Visual = post_resim_pose + offset</c>
+    /// = a multi-metre teleport away from where the body actually is.
+    ///
+    /// Rotation is intentionally NOT re-anchored here. Re-anchoring rotation
+    /// against the post-resim body would lock the visual to its pre-reconcile
+    /// orientation and then decay back toward the (post-resim) body rotation
+    /// over <see cref="DecayTime"/>. For bodies with small reconcile-driven
+    /// rotation deltas (resting cubes, balls just settling) that decay is a
+    /// visible 6-tick rotation wobble repeated on every reconcile (~7 Hz at
+    /// C4) — much more noticeable than the underlying rotation jump, which
+    /// <see cref="AbsorbBodyTeleport"/> already absorbs adequately. Only
+    /// position needed the post-resim fixup; rotation didn't.
+    /// </summary>
+    public void FixupOffsetAfterResim(Vector3 preReconcileVisualPos)
+    {
+        if (Body == null || Visual == null) return;
+
+        Vector3 postResimBodyPos = Body.GlobalPosition;
+        Quaternion postResimBodyRot = Body.Quaternion;
+
+        // Solve for the position offset that reproduces the pre-reconcile
+        // visual position against the post-resim body position:
+        // Body + offset == preVisualPos.
+        _posOffset = preReconcileVisualPos - postResimBodyPos;
+
+        if (TeleportDistance > 0f && _posOffset.Length() > TeleportDistance)
+        {
+            _posOffset = Vector3.Zero;
+            _rotOffset = Quaternion.Identity;
+        }
+
+        // Baseline prev=post-resim so the next _PhysicsProcess doesn't see the
+        // resim's body motion as an unexplained jump and double-absorb it.
+        _prevBodyPos = postResimBodyPos;
+        _prevBodyRot = postResimBodyRot;
+        _hasPrev = true;
+
+        // Write Visual immediately for any same-frame reader (CSV sample,
+        // render-frame between the reconcile and the next _PhysicsProcess).
+        if (SmoothRotation)
+        {
+            Visual.GlobalTransform = new Transform3D(
+                new Basis((_rotOffset * postResimBodyRot).Normalized()),
+                postResimBodyPos + _posOffset);
+        }
+        else
+        {
+            Visual.GlobalPosition = postResimBodyPos + _posOffset;
+        }
+
+        MonkeLogger.Debug($"[SMOOTH-FIXUP] body={Body.Name} preVis=({preReconcileVisualPos.X:F3},{preReconcileVisualPos.Y:F3},{preReconcileVisualPos.Z:F3}) postBody=({postResimBodyPos.X:F3},{postResimBodyPos.Y:F3},{postResimBodyPos.Z:F3}) newOffset=({_posOffset.X:F3},{_posOffset.Y:F3},{_posOffset.Z:F3})");
     }
 
     /// <summary>True while the visual is meaningfully offset from the body.</summary>

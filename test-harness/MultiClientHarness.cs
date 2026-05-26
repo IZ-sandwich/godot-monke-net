@@ -55,6 +55,26 @@ public partial class MultiClientHarness : Node
     private Label _hudLabel;
     private string _desiredWindowTitle;
     private HarnessVideoRecorder _videoRecorder;
+    // Per-second performance snapshot state. Once a wall-clock second elapses,
+    // log a single line summarising Godot's Performance monitors so the cell's
+    // client.log can be diffed across conditions to localise the slowdown
+    // (managed vs physics vs render vs viewport readback). Cheap: one read per
+    // monitor per second, no per-frame overhead.
+    private long _perfNextLogMs = 0;
+    private int _perfFramesThisWindow;
+    private double _perfWorstFrameMs;
+    private int _perfMispredictsAtWindowStart;
+    private long _perfRecorderFramesAtWindowStart;
+    private long _perfRecorderDroppedAtWindowStart;
+
+    // Stashed video-recorder parameters when --defer-video-start is passed.
+    // Construction happens on the "start-recording" orch command instead of in
+    // _Ready, so the captured MP4 can start at the moment of the test's choosing
+    // (e.g. right before entities spawn) rather than at process boot.
+    private string _pendingVideoPath;
+    private string _pendingFfmpegBin;
+    private int _pendingVideoWidth;
+    private int _pendingVideoHeight;
 
     // When non-zero, the observer camera tracks the entity with this id each
     // _Process at a fixed offset; the camera looks at the entity. Set via the
@@ -142,15 +162,29 @@ public partial class MultiClientHarness : Node
                     // so GetImage().Width/Height matches what we declared to
                     // ffmpeg via -video_size.
                     var winSize = DisplayServer.WindowGetSize();
-                    try
+                    bool defer = args.ContainsKey("defer-video-start");
+                    if (defer)
                     {
-                        _videoRecorder = new HarnessVideoRecorder(
-                            ffmpegBin, videoPath, winSize.X, winSize.Y, frameRate: 60);
+                        // Stash params; the recorder is constructed when the
+                        // orchestrator sends "start-recording".
+                        _pendingVideoPath = videoPath;
+                        _pendingFfmpegBin = ffmpegBin;
+                        _pendingVideoWidth = winSize.X;
+                        _pendingVideoHeight = winSize.Y;
+                        GD.PrintErr($"[VIDEO] deferred — waiting for start-recording (path={videoPath})");
                     }
-                    catch (Exception ex)
+                    else
                     {
-                        GD.PrintErr($"[VIDEO] recorder init failed: {ex.GetType().Name}: {ex.Message}");
-                        _videoRecorder = null;
+                        try
+                        {
+                            _videoRecorder = new HarnessVideoRecorder(
+                                ffmpegBin, videoPath, winSize.X, winSize.Y, frameRate: 60);
+                        }
+                        catch (Exception ex)
+                        {
+                            GD.PrintErr($"[VIDEO] recorder init failed: {ex.GetType().Name}: {ex.Message}");
+                            _videoRecorder = null;
+                        }
                     }
                 }
                 else
@@ -233,8 +267,93 @@ public partial class MultiClientHarness : Node
         _hudLabel.Text = $"tick={tickStr}    mispredictions={mispredicts}";
     }
 
+    // Once per wall-clock second, emit a single [PERF] line summarising Godot's
+    // Performance monitors + harness counters. Diff-able across cells to localise
+    // what's consuming CPU under bad-network conditions (script/physics/render/
+    // viewport readback for recording).
+    private void MaybeLogPerfSummary()
+    {
+        if (_role != "client") return;
+        long nowMs = (long)Time.GetTicksMsec();
+        if (_perfNextLogMs == 0)
+        {
+            // First call: prime the window without emitting a line so the very
+            // first sample isn't biased by process-startup costs.
+            _perfNextLogMs = nowMs + 1000;
+            _perfFramesThisWindow = 0;
+            _perfWorstFrameMs = 0;
+            _perfMispredictsAtWindowStart = ReadMispredictCountSafe();
+            _perfRecorderFramesAtWindowStart = _videoRecorder?.Produced ?? 0;
+            _perfRecorderDroppedAtWindowStart = _videoRecorder?.Dropped ?? 0;
+            return;
+        }
+        if (nowMs < _perfNextLogMs) return;
+
+        // Godot Performance API — `GetMonitor` returns a double; times are in
+        // seconds-per-frame for the most recent frame.
+        double timeProcessMs = Performance.GetMonitor(Performance.Monitor.TimeProcess) * 1000.0;
+        double timePhysicsMs = Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000.0;
+        double fps = Performance.GetMonitor(Performance.Monitor.TimeFps);
+        double drawCalls = Performance.GetMonitor(Performance.Monitor.RenderTotalDrawCallsInFrame);
+        double objsInFrame = Performance.GetMonitor(Performance.Monitor.RenderTotalObjectsInFrame);
+        double physActive = Performance.GetMonitor(Performance.Monitor.Physics3DActiveObjects);
+        double physPairs = Performance.GetMonitor(Performance.Monitor.Physics3DCollisionPairs);
+        double physIslands = Performance.GetMonitor(Performance.Monitor.Physics3DIslandCount);
+        double objCount = Performance.GetMonitor(Performance.Monitor.ObjectCount);
+        double nodeCount = Performance.GetMonitor(Performance.Monitor.ObjectNodeCount);
+        double videoMemMb = Performance.GetMonitor(Performance.Monitor.RenderVideoMemUsed) / (1024.0 * 1024.0);
+
+        int mispredictNow = ReadMispredictCountSafe();
+        int mispredictDelta = mispredictNow - _perfMispredictsAtWindowStart;
+
+        long producedNow = _videoRecorder?.Produced ?? 0;
+        long droppedNow = _videoRecorder?.Dropped ?? 0;
+        long produced = producedNow - _perfRecorderFramesAtWindowStart;
+        long dropped = droppedNow - _perfRecorderDroppedAtWindowStart;
+
+        int tick = -1;
+        var cm = ClientManager.Instance;
+        if (cm != null)
+        {
+            var clock = cm.GetNodeOrNull<ClientNetworkClock>("ClientNetworkClock");
+            if (clock != null) tick = clock.GetCurrentTick();
+        }
+
+        MonkeLogger.Info(
+            $"[PERF] tick={tick} frames={_perfFramesThisWindow} fps={fps:F1} "
+            + $"proc_ms={timeProcessMs:F2} phys_ms={timePhysicsMs:F2} worst_frame_ms={_perfWorstFrameMs:F1} "
+            + $"phys_active={physActive:F0} phys_pairs={physPairs:F0} phys_islands={physIslands:F0} "
+            + $"draw_calls={drawCalls:F0} rend_objs={objsInFrame:F0} vidmem_mb={videoMemMb:F1} "
+            + $"obj={objCount:F0} nodes={nodeCount:F0} "
+            + $"mispred_delta={mispredictDelta} rec_produced={produced} rec_dropped={dropped}");
+
+        // Roll the window. Skipped-ticks happen if a frame took >1s; resync
+        // _perfNextLogMs to now+1000 rather than chaining +1000 from stale.
+        _perfNextLogMs = nowMs + 1000;
+        _perfFramesThisWindow = 0;
+        _perfWorstFrameMs = 0;
+        _perfMispredictsAtWindowStart = mispredictNow;
+        _perfRecorderFramesAtWindowStart = producedNow;
+        _perfRecorderDroppedAtWindowStart = droppedNow;
+    }
+
+    private int ReadMispredictCountSafe()
+    {
+        var cm = ClientManager.Instance;
+        if (cm == null) return 0;
+        var pm = FindChildOfType<ClientPredictionManager>(cm);
+        return pm?.MispredictionsCount ?? 0;
+    }
+
     public override void _Process(double delta)
     {
+        // Track per-window frame stats for the once-per-second [PERF] line.
+        // delta is in seconds; keep the worst frame seen so a single hitch
+        // shows up in the log even when the mean stays low.
+        _perfFramesThisWindow++;
+        double frameMs = delta * 1000.0;
+        if (frameMs > _perfWorstFrameMs) _perfWorstFrameMs = frameMs;
+
         // Re-assert the observer camera as the active camera each frame. The
         // LocalRigidPlayer's FirstPersonCameraController sets itself Current
         // when the player spawns; without this re-assert the view would flip
@@ -255,6 +374,7 @@ public partial class MultiClientHarness : Node
         }
 
         UpdateHud();
+        MaybeLogPerfSummary();
 
         // Push a freshly-rendered viewport frame to the recorder if active.
         // Non-blocking: if ffmpeg is behind, the frame is dropped rather than
@@ -366,6 +486,7 @@ public partial class MultiClientHarness : Node
                 "clear-input-schedule" => ClearInputSchedule(),
                 "camera-follow-entity" => CameraFollowEntity(doc.RootElement),
                 "set-camera" => SetCamera(doc.RootElement),
+                "start-recording" => StartRecording(),
                 "shutdown" => Shutdown(),
                 _ => Err($"unknown cmd '{cmd}'"),
             };
@@ -1257,6 +1378,31 @@ public partial class MultiClientHarness : Node
         return Ok(new { followEntityId = eid, offset = SerializeVec3(_cameraFollowOffset) });
     }
 
+    // Constructs the deferred video recorder using the params stashed in
+    // _Ready when --defer-video-start was passed. Idempotent: returns the same
+    // shape if already running or if no recording was requested for this
+    // process, so callers don't need to know the harness's recording state.
+    private string StartRecording()
+    {
+        if (_videoRecorder != null)
+            return Ok(new { started = false, reason = "already running", path = _pendingVideoPath });
+        if (string.IsNullOrEmpty(_pendingVideoPath))
+            return Ok(new { started = false, reason = "no deferred recording configured" });
+        try
+        {
+            _videoRecorder = new HarnessVideoRecorder(
+                _pendingFfmpegBin, _pendingVideoPath,
+                _pendingVideoWidth, _pendingVideoHeight, frameRate: 60);
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[VIDEO] deferred recorder init failed: {ex.GetType().Name}: {ex.Message}");
+            _videoRecorder = null;
+            return Err($"recorder init failed: {ex.Message}");
+        }
+        return Ok(new { started = true, path = _pendingVideoPath });
+    }
+
     // One-shot fixed-pose placement of the observer camera. Useful when the
     // recorded shot wants a static framing rather than chase-cam tracking; the
     // camera does NOT update per-frame the way camera-follow-entity does, so
@@ -1311,7 +1457,14 @@ public partial class MultiClientHarness : Node
         var smoother = FindDescendantOfType<PredictionVisualSmoothing3D>(root);
         if (smoother?.Visual != null)
         {
-            worldPos = smoother.Visual.GlobalPosition;
+            // GetGlobalTransformInterpolated() returns the FTI-interpolated
+            // pose between the visual's previous and current physics-tick
+            // transforms, so the camera tracks smoothly between physics ticks
+            // even though the smoother only writes Visual.GlobalPosition once
+            // per tick. Without this the camera sees the visual stair-step at
+            // 60 Hz, and any rollback-induced one-frame discontinuity in
+            // Visual.GlobalPosition shows up as a visible snap in the video.
+            worldPos = smoother.Visual.GetGlobalTransformInterpolated().Origin;
             lookTarget = worldPos + _cameraFollowLookOffset;
         }
         else
@@ -1483,6 +1636,10 @@ public partial class MultiClientHarness : Node
         private long _dropped;
         private long _written;
         private volatile bool _stopped;
+
+        public long Produced => _produced;
+        public long Dropped => _dropped;
+        public long Written => _written;
 
         public HarnessVideoRecorder(string ffmpegBin, string outputPath, int width, int height, int frameRate)
         {

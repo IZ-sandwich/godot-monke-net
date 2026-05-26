@@ -24,8 +24,7 @@ public interface IScenario
 
     /// <summary>Which network conditions to run this scenario at. Most scenarios
     /// return <see cref="NetworkCondition.All"/>; fixed-condition scenarios (S3
-    /// impulse response, S6 jitter stress, S8 degradation) return a single
-    /// condition.</summary>
+    /// impulse response, S8 degradation) return a single condition.</summary>
     NetworkCondition[] Conditions { get; }
 
     /// <summary>True if this scenario needs a second client (observer / 2-player)

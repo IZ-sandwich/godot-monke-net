@@ -136,8 +136,13 @@ public abstract class QuantitativeTestBase : MultiProcessTestBase
             videoPath = System.IO.Path.Combine(_currentRunArtifactDir,
                 $"{scenario.Id}.{condition.Id}.mp4");
         }
+        // Defer recorder construction so the captured MP4 doesn't include the
+        // ~5 s of clock-sync sampling that runs before scenario.Setup. The
+        // recorder is started below right before Setup, so the video begins
+        // just as the scenario spawns its entities — which is what a reader
+        // actually wants to see.
         var client = orch.Spawn("client", enetPort: relay.ListenPort, label: "c1",
-            recordVideoPath: videoPath);
+            recordVideoPath: videoPath, deferVideoStart: videoPath != null);
         client.WaitReady(networkReady: true, timeoutMs: 60_000);
 
         // Spawn a second client when the scenario opts in (e.g. S5 multi-
@@ -154,18 +159,56 @@ public abstract class QuantitativeTestBase : MultiProcessTestBase
 
         var metrics = new SyncMetrics();
 
-        // Sample clock-sync convergence aggressively for the first ~5 seconds.
-        // The library's steady-state clock-sync algorithm uses 11 samples at 1s
-        // intervals before applying an averaged correction, so anything shorter
-        // than ~3s would only ever see the fast-start phase — but the metric is
-        // supposed to characterise the cold-start-to-steady-state behaviour.
-        SampleClockConvergence(server, client, metrics, samples: 150, intervalMs: 35);
+        // Sample clock-sync convergence aggressively for ~5 seconds — but only
+        // when the scenario actually exposes M1/M2 (just S2). M1/M2 are a pure
+        // function of the NetworkCondition and the library; the scene contents
+        // don't affect them. S2 runs the full condition matrix, so measuring
+        // convergence there covers every condition once for the whole suite —
+        // every other scenario can skip the 5 s sampling window and just wait
+        // briefly for the clock to converge before its action begins.
+        if ((scenario.ApplicableMetrics & MetricKey.ClockConvergence) != 0)
+        {
+            // The library's steady-state clock-sync algorithm uses 11 samples
+            // at 1s intervals before applying an averaged correction, so
+            // anything shorter than ~3s would only ever see the fast-start
+            // phase — but the metric is supposed to characterise the
+            // cold-start-to-steady-state behaviour.
+            SampleClockConvergence(server, client, metrics, samples: 150, intervalMs: 35);
+        }
+        else
+        {
+            // Still wait for the clock to converge before the scenario starts
+            // spawning entities, so the trace measures physics misprediction
+            // rather than "client clock catching up to server". Per-condition
+            // timeout sized to ~p99 × 1.5 of expected cold-start convergence
+            // (NetworkCondition.ClockSyncTimeoutMs) — typically returns much
+            // sooner; the budget only matters on tail-latency runs.
+            WaitForClockSync(server, client, maxGapTicks: 5,
+                timeoutMs: condition.ClockSyncTimeoutMs);
+        }
 
         // Reset bandwidth counters before the observation window so the
         // first sample doesn't include warm-up handshake traffic. PopStatistic
         // is destructive, so this read implicitly zeros the counters.
         try { client.Send(new { cmd = "bandwidth-stats" }); } catch { }
         var bandwidthStopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        // Kick off the deferred recorder (no-op if this cell isn't recording or
+        // the recorder is already running). Placed here so the MP4 starts just
+        // before entities spawn, trimming the cold-start clock-sync window.
+        if (!string.IsNullOrEmpty(videoPath))
+        {
+            try { using var _ = client.Send(new { cmd = "start-recording" }); }
+            catch (Exception ex) { GD.PrintErr($"[QuantitativeTestBase] start-recording failed: {ex.Message}"); }
+        }
+
+        // Optional profiler-attach pause. When MONKENET_TEST_PROFILE=1, hold
+        // before scenario.Setup so the user can hook dotnet-trace onto the
+        // client + server PIDs before the rollback storm starts. The duration
+        // defaults to 20 s; override with MONKENET_TEST_PROFILE_PAUSE_MS. The
+        // pause resolves early if a trigger file appears at
+        // <projectPath>/profile-go.
+        MaybeProfilerPause(client, server, scenario, condition);
 
         scenario.Setup(server, client);
         scenario.Run(server, client, metrics);
@@ -209,6 +252,15 @@ public abstract class QuantitativeTestBase : MultiProcessTestBase
             string targetName = $"{scenario.Id}.{condition.Id}.client.log";
             CopyProcessLog(_currentRunArtifactDir, client.RemoteLogPath, targetName);
         }
+        // Also copy the server's debug log so cross-process timelines can be
+        // reconstructed (e.g. comparing client's auth-snapshot reception
+        // timestamps to the server's send timestamps for the same tick).
+        if (scenario.CopyDebugLog && !string.IsNullOrEmpty(server.RemoteLogPath)
+            && _currentRunArtifactDir != null)
+        {
+            string targetName = $"{scenario.Id}.{condition.Id}.server.log";
+            CopyProcessLog(_currentRunArtifactDir, server.RemoteLogPath, targetName);
+        }
 
         // Mask out metrics the scenario does NOT exercise — render as NaN in
         // the summary so they show as N/A in the dashboard / strip plots
@@ -216,6 +268,126 @@ public abstract class QuantitativeTestBase : MultiProcessTestBase
         var summary = metrics.ToSummary(scenario.Id, condition.Id);
         MaskInapplicableMetrics(summary, scenario.ApplicableMetrics);
         return summary;
+    }
+
+    /// <summary>Hold before scenario.Setup so a PID-attached profiler can
+    /// hook the client. Two modes:
+    ///
+    /// <list type="bullet">
+    /// <item><b>Scripted</b> (MONKENET_TEST_PROFILE_DIR set) — write a
+    /// handshake file <c>next.txt</c> in the comm dir with PID + scenario +
+    /// condition, then poll for a <c>go</c> file the runner script drops
+    /// once <c>dotnet-trace</c> is attached. No fallback timeout; the runner
+    /// owns the schedule.</item>
+    /// <item><b>Manual</b> (MONKENET_TEST_PROFILE=1 but no comm dir) — print
+    /// a copy-paste command and sleep for MONKENET_TEST_PROFILE_PAUSE_MS
+    /// (default 20 s), or until a <c>profile-go</c> file appears in the cwd.</item>
+    /// </list></summary>
+    private static void MaybeProfilerPause(TestProcess client, TestProcess server, IScenario scenario, NetworkCondition condition)
+    {
+        if (!IsEnvTruthy("MONKENET_TEST_PROFILE")) return;
+
+        int clientPid = client.RemotePid;
+        int serverPid = server.RemotePid;
+        string commDir = System.Environment.GetEnvironmentVariable("MONKENET_TEST_PROFILE_DIR");
+
+        if (!string.IsNullOrEmpty(commDir))
+        {
+            ScriptedProfilerPause(commDir, clientPid, serverPid, scenario, condition);
+            return;
+        }
+
+        ManualProfilerPause(clientPid, serverPid, scenario, condition);
+    }
+
+    private static void ScriptedProfilerPause(string commDir, int clientPid, int serverPid, IScenario scenario, NetworkCondition condition)
+    {
+        try { System.IO.Directory.CreateDirectory(commDir); } catch { /* best effort */ }
+        string nextFile = System.IO.Path.Combine(commDir, "next.txt");
+        string goFile   = System.IO.Path.Combine(commDir, "go");
+
+        // Defensive: clear any stale go from a previous cell so we wait for
+        // the runner to drop a fresh one *for this cell*.
+        try { if (System.IO.File.Exists(goFile)) System.IO.File.Delete(goFile); } catch { }
+
+        // Hand both PIDs + cell identity to the runner script. Four lines so
+        // PowerShell's `Get-Content` reads each part on its own line:
+        //   line 0 = client pid
+        //   line 1 = server pid
+        //   line 2 = scenario id
+        //   line 3 = condition id
+        try
+        {
+            System.IO.File.WriteAllText(nextFile,
+                $"{clientPid}\n{serverPid}\n{scenario.Id}\n{condition.Id}\n");
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[PROFILE] failed to write next.txt: {ex.Message} — falling back to manual mode");
+            ManualProfilerPause(clientPid, serverPid, scenario, condition);
+            return;
+        }
+
+        GD.PrintErr($"[PROFILE] cell handshake → client={clientPid} server={serverPid} {scenario.Id} × {condition.Id} (waiting for runner to attach dotnet-trace)");
+
+        // Bounded wait so a runner crash doesn't hang the suite forever.
+        // 5 min is more than enough to launch dotnet-trace even on a slow box.
+        var deadline = DateTime.UtcNow.AddMilliseconds(300_000);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (System.IO.File.Exists(goFile))
+            {
+                try { System.IO.File.Delete(goFile); } catch { }
+                GD.PrintErr($"[PROFILE] runner signalled go — resuming {scenario.Id} × {condition.Id}");
+                return;
+            }
+            System.Threading.Thread.Sleep(100);
+        }
+        GD.PrintErr($"[PROFILE] timed out waiting for runner go signal — resuming without attached trace");
+    }
+
+    private static void ManualProfilerPause(int clientPid, int serverPid, IScenario scenario, NetworkCondition condition)
+    {
+        int pauseMs = 20_000;
+        var raw = System.Environment.GetEnvironmentVariable("MONKENET_TEST_PROFILE_PAUSE_MS");
+        if (!string.IsNullOrEmpty(raw) && int.TryParse(raw, out var parsed) && parsed > 0)
+            pauseMs = parsed;
+
+        string traceClient = $"profile-{scenario.Id}.{condition.Id}.client.nettrace";
+        string traceServer = $"profile-{scenario.Id}.{condition.Id}.server.nettrace";
+        string triggerPath = System.IO.Path.Combine(System.Environment.CurrentDirectory, "profile-go");
+
+        GD.PrintErr("");
+        GD.PrintErr("================================================================");
+        GD.PrintErr($"[PROFILE] paused before {scenario.Id} × {condition.Id} setup");
+        GD.PrintErr($"[PROFILE] client PID = {clientPid}, server PID = {serverPid}");
+        GD.PrintErr($"[PROFILE] in another terminal, run (one per process):");
+        GD.PrintErr($"[PROFILE]   dotnet-trace collect --process-id {clientPid} --duration 00:00:18 -o {traceClient}");
+        GD.PrintErr($"[PROFILE]   dotnet-trace collect --process-id {serverPid} --duration 00:00:18 -o {traceServer}");
+        GD.PrintErr($"[PROFILE] then EITHER touch '{triggerPath}' to continue immediately,");
+        GD.PrintErr($"[PROFILE] OR wait up to {pauseMs} ms for the pause to lapse.");
+        GD.PrintErr("================================================================");
+
+        var deadline = DateTime.UtcNow.AddMilliseconds(pauseMs);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (System.IO.File.Exists(triggerPath))
+            {
+                try { System.IO.File.Delete(triggerPath); } catch { }
+                GD.PrintErr("[PROFILE] trigger file detected — continuing now.");
+                break;
+            }
+            System.Threading.Thread.Sleep(250);
+        }
+        GD.PrintErr($"[PROFILE] resuming — open '{traceClient}' / '{traceServer}' in https://www.speedscope.app when done.");
+    }
+
+    private static bool IsEnvTruthy(string name)
+    {
+        var v = System.Environment.GetEnvironmentVariable(name);
+        if (string.IsNullOrEmpty(v)) return false;
+        v = v.Trim().ToLowerInvariant();
+        return v == "1" || v == "true" || v == "yes" || v == "on";
     }
 
     /// <summary>Replace metrics outside <paramref name="applicable"/> with
@@ -277,7 +449,7 @@ public abstract class QuantitativeTestBase : MultiProcessTestBase
         ["C4"]        = "#9467bd",   // purple
         ["C5"]        = "#8c564b",   // brown
         ["C2-GoodBroadband"] = "#ff7f0e",
-        ["C-JITTER"]  = "#17becf",   // cyan — fallback for the named jitter condition
+        ["CJITTER"]   = "#17becf",   // cyan — isolated-jitter condition (NetworkCondition.C_Jitter)
     };
 
     private static string ColorFor(string conditionId) =>

@@ -2,6 +2,7 @@
 
 [ext_resource type="Script" uid="uid://7mgo6go2n7rc" path="res://demo/players/rigid_player/LocalRigidPlayerPrediction.cs" id="1_lrpp"]
 [ext_resource type="Script" uid="uid://o8fwa7kmma11" path="res://addons/monke-net/src/Shared/PredictionRigidbody3D.cs" id="2_predrb"]
+[ext_resource type="Script" uid="uid://rp5ifdkt35gg" path="res://addons/monke-net/src/Shared/PredictionVisualSmoothing3D.cs" id="2_smooth"]
 [ext_resource type="Script" uid="uid://bqe2nbydcn6ye" path="res://demo/players/local_player/FirstPersonCameraController.cs" id="3_camera"]
 [ext_resource type="Script" uid="uid://pmpqsvm3qlvu" path="res://demo/players/local_player/PlayerInputProducer.cs" id="4_input"]
 [ext_resource type="PackedScene" uid="uid://bsg5g6qsvepfc" path="res://resources/Knight.glb" id="5_knight"]
@@ -161,9 +162,18 @@ Body = NodePath("..")
 AnimTree = NodePath("../AnimationTree")
 metadata/_custom_type_script = "uid://232c1ulw1sk3"
 
-[node name="PredictionRigidbody" type="Node" parent="." unique_id=1602080702 node_paths=PackedStringArray("_body")]
+[node name="PredictionVisualSmoothing" type="Node3D" parent="." unique_id=1602080720 node_paths=PackedStringArray("Body", "Visual")]
+script = ExtResource("2_smooth")
+Body = NodePath("..")
+Visual = NodePath("../KnightRig")
+DecayTime = 0.3
+SmoothRotation = false
+metadata/_custom_type_script = "uid://rp5ifdkt35gg"
+
+[node name="PredictionRigidbody" type="Node" parent="." unique_id=1602080702 node_paths=PackedStringArray("_body", "_smoothing")]
 script = ExtResource("2_predrb")
 _body = NodePath("..")
+_smoothing = NodePath("../PredictionVisualSmoothing")
 metadata/_custom_type_script = "uid://o8fwa7kmma11"
 
 [node name="ClientPredictedEntity" type="Node" parent="." unique_id=1602080703 node_paths=PackedStringArray("_predictionRb")]

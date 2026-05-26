@@ -14,8 +14,9 @@ public sealed class S1_Idle : IScenario
 {
     public string Id => "S1-Idle";
     public NetworkCondition[] Conditions { get; } = { NetworkCondition.C0_Baseline };
-    // Idle baseline exercises clock sync + bandwidth only. No movement = no
-    // mispredicts, no rollbacks, no impulses → M3b/M4/M5/M6/M7/M9 are N/A.
+    // Idle baseline exercises bandwidth only. No movement = no mispredicts,
+    // no rollbacks, no impulses → M3b/M4/M5/M6/M7/M9 are N/A. M1/M2 are
+    // measured by S2 across the full condition matrix (see ClockConvergence).
     public MetricKey ApplicableMetrics => MetricKey.ClockOnly;
 
     private const int EntityTypeBall = 1;

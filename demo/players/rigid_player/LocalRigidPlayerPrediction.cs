@@ -193,6 +193,30 @@ public partial class LocalRigidPlayerPrediction : ClientPredictedEntity
     // constant offset from the camera each render frame (no oscillation).
     // If posFti == pos (FTI off / not tracked), the camera renders the
     // world un-interpolated and any FTI-lerped object oscillates against it.
+    // Cached lookup of the deepest rendered node in the player's mesh chain
+    // (a MeshInstance3D under KnightRig/Rig/Skeleton3D). The smoother
+    // controls KnightRig.GlobalPosition; the actual on-screen pixels come
+    // from the MeshInstance3D's interpolated transform after FTI walks the
+    // KnightRig → Skeleton3D → MeshInstance3D chain. Logging that node's
+    // GetGlobalTransformInterpolated() exposes the value the renderer
+    // actually submits to the RenderingServer (via fti_update_servers_xform
+    // in scene_tree_fti.cpp:585), so any discrepancy between
+    // KnightRig.GlobalPosition (what the smoother controls) and what's
+    // visible in the MP4 shows up as a difference between visFti (the
+    // smoother's target) and meshFti (the rendered transform).
+    private MeshInstance3D _deepestMesh;
+
+    private MeshInstance3D FindDeepestMesh(Node n)
+    {
+        if (n is MeshInstance3D m) return m;
+        foreach (Node child in n.GetChildren())
+        {
+            var f = FindDeepestMesh(child);
+            if (f != null) return f;
+        }
+        return null;
+    }
+
     public override void _Process(double delta)
     {
         base._Process(delta);
@@ -203,6 +227,52 @@ public partial class LocalRigidPlayerPrediction : ClientPredictedEntity
         Vector3 posFti = body.GetGlobalTransformInterpolated().Origin;
         bool ftiSame = pos.IsEqualApprox(posFti);
         double interpFrac = Engine.GetPhysicsInterpolationFraction();
+
+        // RENDERED transform — read the deepest mesh node's interpolated
+        // global position. This is what gets uploaded to the rendering
+        // server and shown in the MP4. If it differs from KnightRig's
+        // visFti (read by the smoother), something downstream in the
+        // KnightRig → Skeleton → MeshInstance chain is offsetting the
+        // visible pixels in a way the smoother doesn't know about.
+        if (_deepestMesh == null && _knightRig != null) _deepestMesh = FindDeepestMesh(_knightRig);
+        if (_deepestMesh != null)
+        {
+            Vector3 meshPos = _deepestMesh.GlobalPosition;
+            Vector3 meshFti = _deepestMesh.GetGlobalTransformInterpolated().Origin;
+            Vector3 knightRigFti = _knightRig != null ? _knightRig.GetGlobalTransformInterpolated().Origin : Vector3.Zero;
+            int clientTick = ClientManager.Instance?
+                .GetNodeOrNull<ClientNetworkClock>("ClientNetworkClock")?
+                .GetCurrentTick() ?? -1;
+            MonkeLogger.Debug($"[RIDER-RENDERED] eid={EntityId} pf={physFrame} clientTick={clientTick} pif={interpFrac:F3} bodyFti=({posFti.X:F5},{posFti.Y:F5},{posFti.Z:F5}) knightRigFti=({knightRigFti.X:F5},{knightRigFti.Y:F5},{knightRigFti.Z:F5}) meshNode={_deepestMesh.Name} meshFti=({meshFti.X:F5},{meshFti.Y:F5},{meshFti.Z:F5}) meshRaw=({meshPos.X:F5},{meshPos.Y:F5},{meshPos.Z:F5})");
+        }
+        // Capture the on-screen render-position of the actual mesh, not just
+        // the KnightRig parent. The Running_A animation drives the skeleton
+        // bones (no root_motion_track is set on the AnimationTree, so the
+        // animation's root translation is APPLIED to bone positions, which
+        // moves the rendered mesh independently from KnightRig.GlobalPosition).
+        // Logging Skeleton3D.GlobalPosition and the Skeleton's root-bone-0
+        // global pose tells us where pixels actually land in the MP4 — the
+        // value the smoother controls is KnightRig.GlobalPosition, but the
+        // user's eye reads the bones.
+        var skeleton = _knightRig?.GetNodeOrNull<Skeleton3D>("Rig/Skeleton3D");
+        if (skeleton != null)
+        {
+            Vector3 skelPos = skeleton.GlobalPosition;
+            Vector3 skelPosFti = skeleton.GetGlobalTransformInterpolated().Origin;
+            // Bone 0 = root bone in glTF imports. Its local pose is animated;
+            // its world pose = skeleton.global * bone-pose-transform.
+            // Sample several bones to see which one drives mesh motion.
+            // glTF imports typically: bone 0 = armature root (identity),
+            // bone 1 = hips (animated for running stride).
+            Transform3D bone0Pose = skeleton.GetBoneGlobalPose(0);
+            Vector3 bone0World = (skeleton.GlobalTransform * bone0Pose).Origin;
+            Transform3D bone1Pose = skeleton.GetBoneGlobalPose(1);
+            Vector3 bone1World = (skeleton.GlobalTransform * bone1Pose).Origin;
+            int clientTick = ClientManager.Instance?
+                .GetNodeOrNull<ClientNetworkClock>("ClientNetworkClock")?
+                .GetCurrentTick() ?? -1;
+            MonkeLogger.Debug($"[RIDER-SKELETON] eid={EntityId} pf={physFrame} clientTick={clientTick} body=({pos.X:F4},{pos.Y:F4},{pos.Z:F4}) knightRig=({_knightRig.GlobalPosition.X:F4},{_knightRig.GlobalPosition.Y:F4},{_knightRig.GlobalPosition.Z:F4}) skel=({skelPos.X:F4},{skelPos.Y:F4},{skelPos.Z:F4}) skelFti=({skelPosFti.X:F4},{skelPosFti.Y:F4},{skelPosFti.Z:F4}) bone0World=({bone0World.X:F4},{bone0World.Y:F4},{bone0World.Z:F4}) bone1World=({bone1World.X:F4},{bone1World.Y:F4},{bone1World.Z:F4}) knightRigYaw={_knightRig.Rotation.Y:F4}");
+        }
         MonkeLogger.Debug($"[RIDER-FRAME] eid={EntityId} pf={physFrame} pif={interpFrac:F3} pos=({pos.X:F5},{pos.Y:F5},{pos.Z:F5}) posFti=({posFti.X:F5},{posFti.Y:F5},{posFti.Z:F5}) ftiSame={ftiSame} frozen={body.Freeze} interpMode={body.PhysicsInterpolationMode}");
     }
 

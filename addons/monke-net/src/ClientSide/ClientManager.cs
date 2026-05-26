@@ -40,6 +40,14 @@ public partial class ClientManager : Node
     private bool _networkReady = false;
     public bool IsNetworkReady => _networkReady;
 
+    // Tick of the last fully-processed (Predict + SpaceStep + RegisterPrediction)
+    // physics frame. Used by _PhysicsProcess to detect engine-freeze-induced tick
+    // gaps and back-fill them in-place so live body integration stays in lock-
+    // step with the client tick clock — see _PhysicsProcess for the rationale.
+    // -1 sentinel = no tick processed yet; the first _PhysicsProcess call only
+    // runs the current tick (no back-fill on cold start).
+    private int _lastProcessedTick = -1;
+
     // Tracks whether we currently have an established server connection.
     // Used to suppress duplicate ServerDisconnected events during reconnect attempts,
     // since each failed ENet connection attempt fires PeerDisconnected(1).
@@ -118,13 +126,56 @@ public partial class ClientManager : Node
         // Read and send produced input to the server
         var input = _inputManager.GenerateAndTransmitInputs(currentTick);
 
+        bool isListenServer = MonkeNetManager.Instance != null && MonkeNetManager.Instance.IsServer;
+
+        // Back-fill any client ticks the engine dropped since the previous
+        // _PhysicsProcess call. Godot's physics catch-up is capped by
+        // `physics/common/max_physics_steps_per_frame` (default 8), so a slow
+        // render frame — typically caused by a previous reconcile's resim cost
+        // — means _PhysicsProcess may be skipped while ClientNetworkClock
+        // continues to advance with wall-clock time. Without back-fill, the
+        // client tick counter outruns local physics integration: live body
+        // state accumulates fewer ticks of motion than the network tick
+        // suggests, snapshots for the skipped ticks arrive with no matching
+        // PredictedState (logged as MISSED-LOCAL-STATE), and when a reconcile
+        // does fire the post-resim body lands behind where it should be (the
+        // tick=634 "visual ahead of rigidbody" artifact in S7 C4).
+        //
+        // The catch-up runs the full Predict + SpaceStep + RegisterPrediction
+        // sequence for each missed tick, using the SAME local input we just
+        // generated for the current tick. This is the GGPO / QuakeWorld
+        // repeat-last-input convention — the held-keys state at the moment
+        // physics caught up is the best estimate of what the player was
+        // pressing during the dropped-tick window (60-Hz physics + human
+        // reaction time means most ticks within a sub-second freeze share
+        // the same input as the surrounding live ticks). Inputs are NOT
+        // re-transmitted to the server: the server has already advanced past
+        // those ticks and won't apply retroactively-dated inputs.
+        //
+        // Listen-server mode skips back-fill: client and server share the same
+        // tick clock there, so there's no drift to repair, and any extra
+        // SpaceStep would double-integrate the shared World3D.Space.
+        if (!isListenServer && _lastProcessedTick >= 0 && currentTick > _lastProcessedTick + 1)
+        {
+            int catchupStart = _lastProcessedTick + 1;
+            int catchupEnd = currentTick - 1;
+            MonkeLogger.Debug($"[CLIENT-TICK-CATCHUP] back-filling ticks {catchupStart}..{catchupEnd} ({catchupEnd - catchupStart + 1} dropped by engine freeze)");
+            for (int catchupTick = catchupStart; catchupTick <= catchupEnd; catchupTick++)
+            {
+                _predictionManager.Predict(catchupTick, input);
+                ClientTick?.Invoke(catchupTick, input);
+                PhysicsServer3D.SpaceStep(MonkeNetManager.Instance.PhysicsSpace, PhysicsUtils.DeltaTime);
+                PhysicsServer3D.SpaceFlushQueries(MonkeNetManager.Instance.PhysicsSpace);
+                _predictionManager.RunPostPhysicsTick(catchupTick, input);
+                _predictionManager.RegisterPrediction(catchupTick, input);
+            }
+        }
+
         // Call OnProcessTick on all entities, pass current input so they can simulate.
         // This queues forces on rigid bodies (and runs MoveAndSlide on the player, which
         // applies push impulses to networked rigid bodies via SharedPlayerMovement).
         _predictionManager.Predict(currentTick, input);
         ClientTick?.Invoke(currentTick, input);
-
-        bool isListenServer = MonkeNetManager.Instance != null && MonkeNetManager.Instance.IsServer;
 
         if (!isListenServer)
         {
@@ -154,6 +205,8 @@ public partial class ClientManager : Node
             // call use the input/tick from THIS frame.
             _predictionManager.StashForLatePrediction(currentTick, input);
         }
+
+        _lastProcessedTick = currentTick;
     }
 
     public void Initialize(INetworkManager networkManager, string address, int port)

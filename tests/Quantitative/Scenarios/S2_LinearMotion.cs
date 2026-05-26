@@ -16,8 +16,12 @@ public sealed class S2_LinearMotion : IScenario
     public string Id => "S2-LinearMotion";
     public NetworkCondition[] Conditions => NetworkCondition.All;
     // Deterministic linear motion — no impulses → M7 N/A; everything else
-    // applies (M5 measures position error scale with latency).
-    public MetricKey ApplicableMetrics => MetricKey.PhysicsBasic;
+    // applies (M5 measures position error scale with latency). S2 is also the
+    // sole scenario that opts into ClockConvergence (M1/M2): it runs the full
+    // condition matrix, M1/M2 don't depend on scene contents, so measuring them
+    // here covers every condition and avoids the ~5 s sampling window in every
+    // other cell.
+    public MetricKey ApplicableMetrics => MetricKey.PhysicsBasicWithClock;
 
     private const int EntityTypeRigidPlayer = 3;
     private int _playerId;

@@ -37,7 +37,9 @@ public class QuantitativeSuite : QuantitativeTestBase
         new S3_ImpulseResponse(),
         new S4_PhysicsStack(),
         new S5_MultiClientSharedPhysics(),
-        new S6_JitterStress(),
+        // S6_JitterStress removed: M1/M2 are measured only by S2 now, and
+        // the isolated-jitter profile (50 ms latency, 50 ms jitter, 0 % loss)
+        // moved to NetworkCondition.C_Jitter so it shows up in S2's matrix.
         new S7_MultiBodyChaos(),
         new S8_DegradationStress(),
     };

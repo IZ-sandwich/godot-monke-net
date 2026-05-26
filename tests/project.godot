@@ -1,31 +1,28 @@
 ; Engine configuration file.
-; Minimal Godot project for GdUnit4 runtime test execution.
-; The test adapter requires project.godot to be alongside the test .csproj.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
 
 config_version=5
 
 [application]
 
-config/features=PackedStringArray("4.7", "C#", "Forward Plus")
 config/name="MonkeNetTests"
+config/features=PackedStringArray("4.7", "C#", "Forward Plus")
 
 [autoload]
 
-; MonkeLogger autoload mirrors the main project's so file-logging works in the
-; subprocesses the multi-process harness spawns under --path=tests. Without this
-; entry MonkeLogger.OpenLogFile never runs and no monke-net_*.log is produced.
 MonkeLogger="*uid://b7m3xwoaqrktv"
 MonkeNet="*uid://bchfwceouveq2"
-
-[physics]
-
-; Match the main project's physics settings so multi-process tests exercise the
-; same SceneTreeFTI / Jolt path the demo runs interactively. Without
-; physics_interpolation=true here, the test client process disables FTI and
-; per-render-frame smoothness tests measure un-interpolated transforms.
-3d/physics_engine="Jolt Physics"
-common/physics_interpolation=true
 
 [dotnet]
 
 project/assembly_name="MonkeNetTests"
+
+[physics]
+
+3d/physics_engine="Jolt Physics"
+common/physics_interpolation=true

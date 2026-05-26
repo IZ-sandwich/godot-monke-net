@@ -14,12 +14,26 @@ namespace MonkeNet.Client;
 [GlobalClass]
 public partial class ClientPredictionManager : InternalClientComponent
 {
-    // Hard cap on prediction history depth. Default 120 = 2 seconds at 60Hz.
-    // Under sustained network degradation _predictedStates would otherwise grow without
-    // bound and rollback would resimulate every entry — which is what overflows the
-    // Jolt job ring buffer. When the cap is hit, oldest entries are dropped; a snapshot
-    // arriving for a dropped tick is treated as a missed local state (counted, no rollback).
-    [Export] public int MaxRollbackTicks { get; set; } = 120;
+    // Hard cap on prediction history depth + maximum rollback resim depth in
+    // ticks. Default 10 ≈ 166ms at 60Hz. The cap bounds the per-snapshot resim
+    // CPU cost: at C4 conditions the holistic SpaceStep over ~40 rigid bodies
+    // costs ~3-5ms per resim tick, so a 47-tick rollback would freeze the
+    // engine for ~200ms and cascade into more dropped physics ticks. The
+    // smaller the cap, the smaller the worst-case freeze.
+    //
+    // Snapshots arriving for ticks older than (current - MaxRollbackTicks) are
+    // dropped (counted as MissedLocalState) since the matching PredictedState
+    // entry has already been trimmed. This biases the trade-off toward
+    // "smooth rendering with occasional accepted desync" over "perfect
+    // reconciliation with engine freezes". SnapNet's rollback analysis cites
+    // ~15-frame practical cap on 60Hz before the spiral-of-death pattern
+    // sets in for any non-trivial simulation; Photon Fusion 2 sidesteps the
+    // cap entirely by only resimming the own player and snapshot-
+    // interpolating everything else (the architectural change MonkeNet has
+    // not yet adopted).
+    [Export] public int MaxRollbackTicks { get; set; } = 25;
+
+
 
     private readonly List<PredictedState> _predictedStates = [];
     // Per-entity per-tick input cache populated from GameSnapshotMessage.Inputs
@@ -94,6 +108,7 @@ public partial class ClientPredictionManager : InternalClientComponent
     // M9 metric — see ResolveRemoteInput for the rationale.
     private readonly HashSet<int> _entitiesEverHadInput = new();
     private int _missedLocalState = 0;
+    private int _snapOverflowCount = 0;
     private int _trimmedTotal = 0;
     private ulong _lastTrimWarningMsec;
     private bool _wasRecentlyTrimmed;   // set when buffer hits cap; signals degraded network to the next misprediction log
@@ -200,7 +215,15 @@ public partial class ClientPredictionManager : InternalClientComponent
         {
             if (snapshot.Tick > _lastTickReceived)
             {
-                MonkeLogger.Debug($"[NET-SNAP-RX] tick={snapshot.Tick} entities={snapshot.States.Length} (last={_lastTickReceived})");
+                // Capture the full clock state at the moment of reception so
+                // we can attribute rollback depth to each source term.
+                int rawTick = ClientManager.Instance?.GetNodeOrNull<ClientNetworkClock>("ClientNetworkClock")?.RawTick ?? -1;
+                int avgLat = ClientManager.Instance?.GetNodeOrNull<ClientNetworkClock>("ClientNetworkClock")?.AverageLatencyInTicks ?? -1;
+                int jitter = ClientManager.Instance?.GetNodeOrNull<ClientNetworkClock>("ClientNetworkClock")?.JitterInTicks ?? -1;
+                int curTick = ClientManager.Instance?.GetNodeOrNull<ClientNetworkClock>("ClientNetworkClock")?.GetCurrentTick() ?? -1;
+                int depth = curTick - snapshot.Tick;
+                int rawAge = rawTick - snapshot.Tick;
+                MonkeLogger.Debug($"[NET-SNAP-RX] tick={snapshot.Tick} entities={snapshot.States.Length} (last={_lastTickReceived}) | curTick={curTick} rawTick={rawTick} rawAge={rawAge} avgLat={avgLat} jitter={jitter} depth={depth}");
                 for (int i = 0; i < snapshot.States.Length; i++)
                     MonkeLogger.Debug($"[NET-SNAP-RX]   state[{i}]={snapshot.States[i]}");
                 _lastTickReceived = snapshot.Tick;
@@ -453,6 +476,39 @@ public partial class ClientPredictionManager : InternalClientComponent
             // ClientPredictedEntity in the scene). This is the normal pre-spawn / spectator
             // path, not a fault. Don't count it or log it.
             if (!HasAnyPredictedEntity()) return;
+
+            // Snap-on-overflow: snapshot tick is older than the oldest entry
+            // still in _predictedStates. That means the matching predicted
+            // entry was trimmed when the buffer hit MaxRollbackTicks — i.e.
+            // the snapshot represents an authoritative state from too deep
+            // in the past to resimulate forward affordably. If we just
+            // dropped it (the previous behaviour), the client's body would
+            // drift unbounded from the server's truth at C4 conditions
+            // (observed 3.5m RMS / 6.6m P95 drift in cap=25 measurement run
+            // 2026-05-25--23-34-50). Instead, teleport every entity body to
+            // its authoritative state from the snapshot — accept a visible
+            // 1-frame snap backward in exchange for keeping the client and
+            // server pose+velocity in lockstep. The SpaceStep resim is
+            // skipped entirely, so this path costs ~one body-pose write per
+            // entity rather than ~N × full-scene SpaceStep.
+            //
+            // The smoother absorbs the teleport via AbsorbBodyTeleport
+            // (called inside HandleReconciliation), and ResetBodyFtiAfterResim
+            // pins SceneTreeFTI's local_prev = local_curr so the renderer
+            // doesn't interpolate backward across the snap.
+            //
+            // Distinguish "trimmed by cap" (snap) from "never registered"
+            // (genuine MissedLocalState, log only) by checking against the
+            // oldest still-kept tick.
+            int oldestKeptTick = _predictedStates.Count > 0
+                ? _predictedStates[0].Tick
+                : int.MaxValue;
+            if (receivedSnapshot.Tick < oldestKeptTick)
+            {
+                SnapToAuthOverflow(receivedSnapshot);
+                return;
+            }
+
             _missedLocalState++;
             MonkeLogger.Debug($"[PRED-CHECK] tick={receivedSnapshot.Tick} MISSED-LOCAL-STATE (no matching predicted entry; total missed={_missedLocalState})");
             return;
@@ -718,6 +774,24 @@ public partial class ClientPredictionManager : InternalClientComponent
         if (!isListenServer)
             OfflineRigidbody3D.SnapshotAll();
 
+        // Snapshot each smoothed entity's PRE-reconcile visual POSITION so we
+        // can re-anchor the smoother offset after the resim loop completes.
+        // AbsorbBodyTeleport (called inside HandleReconciliation) sizes the
+        // offset against the auth_pose, but the resim about to run moves the
+        // body from auth_pose to post_resim_pose. Without the post-resim
+        // fixup the offset is stale by (auth_pose − post_resim_pose) and the
+        // visual teleports forward by exactly that gap on the next render.
+        // See PredictionVisualSmoothing3D.FixupOffsetAfterResim for details
+        // (including why only position — not rotation — gets re-anchored).
+        Dictionary<ClientPredictedEntity, Vector3> preReconcileVisualPos = null;
+        foreach (ClientPredictedEntity predictableEntity in predictedStateData.Entities.Keys)
+        {
+            var smoother = FindSmootherFor(predictableEntity);
+            if (smoother?.Visual == null) continue;
+            preReconcileVisualPos ??= new Dictionary<ClientPredictedEntity, Vector3>();
+            preReconcileVisualPos[predictableEntity] = smoother.Visual.GlobalPosition;
+        }
+
         // Set all entities to authoritative state. Critical for the unified-prediction
         // model where every client predicts every entity (including server-owned ones) —
         // reconcile is the only way the client's locally-simulated body learns the
@@ -740,42 +814,230 @@ public partial class ClientPredictionManager : InternalClientComponent
             return;
         }
 
-        // Advance simulation forward for all remaining inputs
+        // Advance simulation forward through every tick between the reconciled
+        // tick and the current local tick. Iterating the TICK RANGE rather
+        // than the list of registered PredictedState entries is load-bearing:
+        // engine freezes (often caused by a previous reconcile's resim cost)
+        // cause Godot to silently drop physics ticks via
+        // `physics/common/max_physics_steps_per_frame`, after which
+        // ClientNetworkClock jumps the local tick forward to align with
+        // server time WITHOUT actually running the missed physics ticks.
+        // That leaves `_predictedStates` with gaps — entries for ticks
+        // [592, 612] with 593..611 absent, etc. If we iterated entries and
+        // did one SpaceStep per entry, the resim would be short by the gap
+        // size (15+ ticks worth of motion in observed C4 cases) and the
+        // body would land 0.5–1.5m behind where the LIVE body had advanced
+        // to by the same wall-clock moment. That stale post-resim pose then
+        // becomes the body's render pose, while the smoother's
+        // FixupOffsetAfterResim anchors the visual to the pre-reconcile
+        // visual position — producing exactly the "visual stuck X metres
+        // ahead of the rigidbody" artifact seen on the rigid-body player
+        // during S7 C4.
+        //
+        // Iterating by tick lets us insert a SpaceStep for every missing
+        // tick. For gap ticks we replay the local entity's most recent
+        // input (best approximation of what the live tick would have used
+        // had it not been dropped) and the server-cached input for remote
+        // entities via the same ResolveRemoteInput path. Bodies for which
+        // no PredictedState entry exists at the missing tick still get
+        // their post-step pose written back into a fresh PredictedState
+        // record so a later PRED-CHECK comparing that tick has a slot to
+        // compare against.
         int myId = ClientManager.Instance?.GetNetworkId() ?? 0;
-        for (int i = 0; i < _predictedStates.Count; i++)
+        int firstResimTick = predictedStateData.Tick + 1;
+        int lastResimTick = _predictedStates.Count > 0
+            ? _predictedStates[_predictedStates.Count - 1].Tick
+            : firstResimTick - 1;
+        var statesByTick = new Dictionary<int, PredictedState>(_predictedStates.Count);
+        foreach (var ps in _predictedStates) statesByTick[ps.Tick] = ps;
+
+        // Most-recent local input — used as the fall-back for the rare gap
+        // tick that still slips through (ClientManager._PhysicsProcess now
+        // back-fills engine-freeze-skipped ticks at predict time, so a
+        // registered-state gap inside the rollback window should be vanishing-
+        // rare; this synthesised-entry path is a safety net for that residual
+        // case). Replays the last known held input — matches the GGPO /
+        // QuakeWorld convention that "missing input == continue previous".
+        IPackableElement lastLocalInput = null;
+        if (_predictedStates.Count > 0) lastLocalInput = _predictedStates[0].Input;
+
+        // Reference entity set: the union of all entities that ever appeared
+        // in a registered state for this rollback. Used to populate freshly
+        // synthesised PredictedState entries for the gap ticks.
+        var referenceEntities = predictedStateData.Entities.Keys;
+
+        for (int tick = firstResimTick; tick <= lastResimTick; tick++)
         {
-            var remainingInput = _predictedStates[i];
-            MonkeLogger.Debug($"[PRED-RESIM] resimTick={remainingInput.Tick} entities={remainingInput.Entities.Count} input={remainingInput.Input}");
-            foreach (ClientPredictedEntity predictableEntity in remainingInput.Entities.Keys)
+            statesByTick.TryGetValue(tick, out var stateAtTick);
+            if (stateAtTick == null)
             {
-                // Per-entity input routing: the locally-driven entity replays the
-                // local input recorded at this past tick; other entities replay
-                // the server input the snapshot history records for this
-                // specific tick. The cache is per-(entity, tick) so resim of
-                // distant past ticks for non-owned entities replays the actual
-                // input the server applied at each tick rather than
-                // approximating with "latest cached input for everything in
-                // the rollback window" — the rollback now converges against
-                // the same input timeline the server saw.
+                // Gap tick — synthesise a PredictedState so the post-step
+                // record gets captured (otherwise a future snapshot for this
+                // tick would see no matching predicted entry and route to
+                // MISSED-LOCAL-STATE instead of reconciling). Local input
+                // replays the last known held input.
+                stateAtTick = new PredictedState
+                {
+                    Tick = tick,
+                    Input = lastLocalInput,
+                    Entities = new Dictionary<ClientPredictedEntity, RigidbodyState>(),
+                };
+                statesByTick[tick] = stateAtTick;
+                _predictedStates.Add(stateAtTick);
+                MonkeLogger.Debug($"[PRED-RESIM-FILLGAP] tick={tick} synthesised entry for resim gap (replayed last local input={lastLocalInput})");
+            }
+            else if (stateAtTick.Input != null)
+            {
+                lastLocalInput = stateAtTick.Input;
+            }
+
+            MonkeLogger.Debug($"[PRED-RESIM] resimTick={tick} entities={referenceEntities.Count} input={stateAtTick.Input}");
+            foreach (ClientPredictedEntity predictableEntity in referenceEntities)
+            {
+                // Per-entity input routing identical to the original loop —
+                // local entity replays the LOCAL input we recorded for this
+                // tick (or the last-known input for synthesised gap ticks);
+                // other entities replay the server input the snapshot history
+                // records for this specific tick. ResolveRemoteInput already
+                // falls back to the closest preceding cached tick when an
+                // exact match is unavailable, so passive props and remote
+                // players get the same input the server would have applied.
                 IPackableElement entityInput = (predictableEntity.Authority == myId)
-                    ? remainingInput.Input
-                    : ResolveRemoteInput(predictableEntity.EntityId, remainingInput.Tick);
+                    ? stateAtTick.Input
+                    : ResolveRemoteInput(predictableEntity.EntityId, tick);
                 predictableEntity.ResimulateTick(entityInput);
             }
 
             PhysicsServer3D.SpaceStep(MonkeNetManager.Instance.PhysicsSpace, PhysicsUtils.DeltaTime);
             PhysicsServer3D.SpaceFlushQueries(MonkeNetManager.Instance.PhysicsSpace);
 
-            foreach (ClientPredictedEntity predictableEntity in remainingInput.Entities.Keys)
+            foreach (ClientPredictedEntity predictableEntity in referenceEntities)
             {
                 var post = predictableEntity.GetSnapshotState();
-                remainingInput.Entities[predictableEntity] = post;
+                stateAtTick.Entities[predictableEntity] = post;
                 MonkeLogger.Debug($"[PRED-RESIM]   eid={predictableEntity.EntityId} postPos=({post.Position.X:F3},{post.Position.Y:F3},{post.Position.Z:F3}) postVel=({post.LinearVelocity.X:F3},{post.LinearVelocity.Y:F3},{post.LinearVelocity.Z:F3})");
             }
         }
 
+        // _predictedStates may have grown out-of-order (we Add'd synthesised
+        // entries at the end). Resort by Tick so a subsequent snapshot's
+        // Find(tick) still hits the right index and any future iteration of
+        // the list iterates in tick order. Stable sort isn't necessary —
+        // (tick, input) pairs are unique by construction.
+        _predictedStates.Sort((a, b) => a.Tick.CompareTo(b.Tick));
+
         OfflineRigidbody3D.RestoreAll();
+
+        // Re-pump SceneTreeFTI prev=curr on every reconciled body, including
+        // those without a wired smoother (e.g. LocalBall — no Visual node, so
+        // no FixupOffsetAfterResim runs for it). Without this, the body's
+        // local_transform_prev is still the auth_pose set by
+        // PredictionRigidbody3D.Reconcile BEFORE the resim ran, while
+        // local_transform_curr is the post_resim pose — so the renderer lerps
+        // the body backward across child mesh chains during the render
+        // frames following this tick. Visible on the balls' meshes as the
+        // sliding-backwards artifact the user just reported, separate from
+        // the rigid player one fixed by FixupOffsetAfterResim. Safe per
+        // <see cref="PredictionRigidbody3D.ResetBodyFtiAfterResim"/> — pure
+        // FTI tracking update, no PhysicsServer3D call, no contact-cache
+        // invalidation.
+        foreach (ClientPredictedEntity predictableEntity in predictedStateData.Entities.Keys)
+        {
+            var rb = FindRigidbodyFor(predictableEntity);
+            rb?.ResetBodyFtiAfterResim();
+        }
+
+        // Re-anchor each smoother's offset against the post-resim body pose.
+        // The offset captured by AbsorbBodyTeleport during HandleReconciliation
+        // was sized against the auth_pose (rollback target); the resim loop
+        // above moved the body to post_resim_pose. Without this re-anchor the
+        // visual would teleport forward by (auth_pose − post_resim_pose) on
+        // the next render frame — exactly the multi-metre visual jumps seen
+        // around ticks 634/659/683/697/708/721/782/798 in S7-C4.
+        if (preReconcileVisualPos != null)
+        {
+            foreach (var (predictableEntity, prePos) in preReconcileVisualPos)
+            {
+                var smoother = FindSmootherFor(predictableEntity);
+                smoother?.FixupOffsetAfterResim(prePos);
+            }
+        }
+
         MonkeLogger.Debug($"[PRED-ROLLBACK] complete (offline bodies restored)");
+    }
+
+    /// <summary>Snap every locally-known predicted entity to its
+    /// authoritative state from <paramref name="snapshot"/>, skipping the
+    /// resim loop entirely. Called when the snapshot tick is older than the
+    /// rollback cap allows — see the call site in
+    /// <see cref="ProcessServerState"/> for the rationale.</summary>
+    private void SnapToAuthOverflow(GameSnapshotMessage snapshot)
+    {
+        int snapped = 0;
+        if (EntitySpawner.Instance != null)
+        {
+            foreach (var entity in EntitySpawner.Instance.ClientEntities)
+            {
+                var cpe = entity.GetComponent<ClientPredictedEntity>();
+                if (cpe == null) continue;
+                var authState = FindStateForEntityId(cpe.EntityId, snapshot.States);
+                if (authState == null) continue;
+                // Log per-entity auth pose so post-hoc analysis can plot the
+                // server-truth trajectory alongside the client-side render.
+                Vector3 authPos = cpe.ExtractAuthoritativePosition(authState);
+                Vector3 authVel = cpe.ExtractAuthoritativeVelocity(authState);
+                MonkeLogger.Debug($"[PRED-SNAP-OVERFLOW-ENTITY] tick={snapshot.Tick} eid={cpe.EntityId} authPos=({authPos.X:F3},{authPos.Y:F3},{authPos.Z:F3}) authVel=({authVel.X:F3},{authVel.Y:F3},{authVel.Z:F3})");
+                // HandleReconciliation writes body pose+velocity to the auth
+                // state AND calls AbsorbBodyTeleport on the smoother, so the
+                // visual stays at its pre-snap pose and decays over DecayTime.
+                cpe.HandleReconciliation(authState);
+                // Pin FTI prev=curr to the new pose so the renderer doesn't
+                // interpolate backward across the snap.
+                var rb = FindRigidbodyFor(cpe);
+                rb?.ResetBodyFtiAfterResim();
+                snapped++;
+            }
+        }
+        _snapOverflowCount++;
+        MonkeLogger.Debug($"[PRED-SNAP-OVERFLOW] tick={snapshot.Tick} entities={snapped} (snapshot too old for resim; snapped to auth pose without forward resim, total snaps={_snapOverflowCount})");
+    }
+
+    private static PredictionRigidbody3D FindRigidbodyFor(ClientPredictedEntity entity)
+    {
+        if (entity == null) return null;
+        Node root = EntitySpawner.Instance?.GetEntityRoot(entity);
+        if (root == null) return null;
+        return FindFirstRigidbody(root);
+    }
+
+    private static PredictionRigidbody3D FindFirstRigidbody(Node node)
+    {
+        if (node is PredictionRigidbody3D rb) return rb;
+        foreach (Node child in node.GetChildren())
+        {
+            var found = FindFirstRigidbody(child);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private static PredictionVisualSmoothing3D FindSmootherFor(ClientPredictedEntity entity)
+    {
+        if (entity == null) return null;
+        Node root = EntitySpawner.Instance?.GetEntityRoot(entity);
+        if (root == null) return null;
+        return FindFirstSmoother(root);
+    }
+
+    private static PredictionVisualSmoothing3D FindFirstSmoother(Node node)
+    {
+        if (node is PredictionVisualSmoothing3D s) return s;
+        foreach (Node child in node.GetChildren())
+        {
+            var found = FindFirstSmoother(child);
+            if (found != null) return found;
+        }
+        return null;
     }
 
     private static bool HasAnyPredictedEntity()

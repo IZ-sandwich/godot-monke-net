@@ -262,6 +262,31 @@ public partial class PredictionRigidbody3D : Node
             _smoothing.AbsorbBodyTeleport(prePos, preRot, authoritative.Position, authoritative.Rotation);
     }
 
+    /// <summary>
+    /// Re-pump this body's SceneTreeFTI <c>local_transform_prev</c> to the
+    /// current local transform AFTER the rollback's resim loop completes.
+    /// Required because <see cref="Reconcile"/> calls
+    /// <c>ResetPhysicsInterpolation()</c> BEFORE the resim runs (setting
+    /// prev=curr=auth_pose), and the resim then steps the body forward
+    /// while leaving prev stuck at the auth pose. The next render frame
+    /// would otherwise lerp the body from auth → post_resim across its
+    /// child mesh chain, visible as a sliding-backwards visual artifact
+    /// every rollback (this is what S7-C4 reproduces on the ball and rigid-
+    /// player meshes). Called by <c>ClientPredictionManager</c> at the end
+    /// of <c>RollbackAndResimulate</c> for every reconciled entity, whether
+    /// or not it has a wired smoother. Pure FTI tracking update —
+    /// propagates <c>NOTIFICATION_RESET_PHYSICS_INTERPOLATION</c> through
+    /// the body's subtree but does NOT touch <c>PhysicsServer3D</c>: no
+    /// body activation, no manifold invalidation, no contact-cache flush
+    /// (verified by grepping <c>scene/3d/physics/</c> — only
+    /// <c>VehicleBody3D</c> overrides the notification, for its wheels).
+    /// </summary>
+    public void ResetBodyFtiAfterResim()
+    {
+        if (_body == null) return;
+        _body.ResetPhysicsInterpolation();
+    }
+
     // Tight tolerances for "we already match this target" — used only by SnapToRest,
     // which only ever runs when both sides agree the body is at rest. 1 mm² and 0.1°
     // are well below any legitimate Jolt micro-drift, so passing them means the body

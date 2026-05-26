@@ -10,8 +10,8 @@ param(
     # Run inside a transient working-tree copy so multiple invocations can run
     # in parallel without colliding on (a) the shared `.godot/mono/temp/bin/Debug`
     # build output dir, (b) gdUnit4's per-assembly named pipe (the pipe name is
-    # derived from the test dll filename — same dll path = same pipe = collision
-    # — so two parallel runs MUST run from different paths), and (c) the
+    # derived from the test dll filename - same dll path = same pipe = collision
+    # - so two parallel runs MUST run from different paths), and (c) the
     # `TestResults/` artifact dir. The copy includes BOTH tracked and untracked
     # files (mirrors the full working tree), so uncommitted changes flow into
     # the run. The copy is removed on exit; any artefacts under TestResults/
@@ -23,6 +23,10 @@ param(
     # test build would fail with CS0246 ("ArtifactPaths could not be found").
     # A mirror copy captures everything on disk, tracked or not.
     [switch]$Worktree,
+
+    # Pause each Quantitative cell right before scenario.Setup so you can attach
+    # dotnet-trace by PID. See run-tests.ps1's -AttachProfiler help.
+    [switch]$AttachProfiler,
 
     # Print usage and exit. -h is recognised as a short alias.
     [Alias('h')]
@@ -79,6 +83,23 @@ Examples:
 
 $env:GODOT_BIN = "C:\Users\ivanz\Godot\godot-mp-modified\bin\godot.windows.editor.dev.x86_64.mono.console.exe"
 
+# Forward -AttachProfiler. Set unconditionally so a prior session's value
+# can't leak into a follow-up run. When ON, also set MONKENET_TEST_PROFILE_DIR
+# to a fresh per-PID temp dir so the watcher and the harness agree on where
+# the per-cell handshake files live; the worktree script picks the env var
+# up and dispatches to tools/Watch-AttachProfiler.ps1.
+$env:MONKENET_TEST_PROFILE = if ($AttachProfiler) { "1" } else { "0" }
+if ($AttachProfiler) {
+    $profileDir = Join-Path $env:TEMP "monke-net-profile-$PID"
+    if (Test-Path $profileDir) { Remove-Item -Recurse -Force $profileDir }
+    New-Item -ItemType Directory -Path $profileDir | Out-Null
+    $env:MONKENET_TEST_PROFILE_DIR = $profileDir
+    Write-Host "[run-multiprocess-tests] AttachProfiler ON - comm dir=$profileDir"
+    Write-Host "[run-multiprocess-tests] traces will land in: $(Join-Path $PSScriptRoot 'tests\TestResults\profile-traces')"
+} else {
+    Remove-Item Env:MONKENET_TEST_PROFILE_DIR -ErrorAction SilentlyContinue
+}
+
 # Build the test filter once, regardless of worktree mode.
 if ($Test) {
     $filter = "FullyQualifiedName~MonkeNet.Tests.MultiProcess&FullyQualifiedName~$Test"
@@ -86,7 +107,7 @@ if ($Test) {
     $filter = "FullyQualifiedName~MonkeNet.Tests.MultiProcess"
 }
 
-# ── Worktree path (working-tree copy, not git worktree) ───────────────────
+# ?? Worktree path (working-tree copy, not git worktree) ???????????????????
 # Delegate the working-tree mirror + per-PID assembly rename + project.godot
 # rewrite + run + artefact copy-back to the shared helper. See
 # tools/Invoke-TestInWorktree.ps1 for the why.
@@ -100,11 +121,26 @@ if ($Worktree) {
     exit $LASTEXITCODE
 }
 
-# ── In-place path (default) ───────────────────────────────────────────────
+# ?? In-place path (default) ???????????????????????????????????????????????
 # Original behavior preserved for single-runner workflows. Cannot be run in
-# parallel with another in-place invocation — they'll collide on the gdUnit4
+# parallel with another in-place invocation - they'll collide on the gdUnit4
 # pipe and the shared bin/ dir. Use -Worktree for parallel runs.
 $proc = Start-Process -FilePath "dotnet" -ArgumentList "test tests/MonkeNetTests.csproj --logger console;verbosity=normal --filter $filter" -RedirectStandardOutput "test-output-multiprocess.log" -RedirectStandardError "test-error-multiprocess.log" -NoNewWindow -PassThru
+
+if ($AttachProfiler) {
+    # Same handshake-watcher as the worktree path.
+    & (Join-Path $PSScriptRoot "tools\Watch-AttachProfiler.ps1") `
+        -Process     $proc `
+        -CommDir     $env:MONKENET_TEST_PROFILE_DIR `
+        -TraceOutDir (Join-Path $PSScriptRoot "tests\TestResults\profile-traces") `
+        -TimeoutMs   300000
+    if (-not $proc.HasExited) {
+        if (-not $proc.WaitForExit(5000)) { $proc.Kill($true); $exit = 1 }
+        else { $exit = $proc.ExitCode }
+    } else { $exit = $proc.ExitCode }
+    Get-Content "test-output-multiprocess.log"
+    exit $exit
+}
 
 if (-not $proc.WaitForExit(300000)) {
     Write-Host "Timeout reached - killing test process"

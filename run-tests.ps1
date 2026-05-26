@@ -12,6 +12,15 @@ param(
     # artifact dir. See tools/Invoke-TestInWorktree.ps1 for the why.
     [switch]$Worktree,
 
+    # Pause each Quantitative cell right before scenario.Setup so you can
+    # hook dotnet-trace (or another PID-attached profiler) onto the spawned
+    # client process before the rollback storm starts. Prints the PID and a
+    # copy-paste command; resumes after 20 s OR when a "profile-go" file
+    # appears in the project root. Override the pause via
+    # $env:MONKENET_TEST_PROFILE_PAUSE_MS. (Switch is not named -Profile
+    # because $Profile is a PowerShell automatic variable.)
+    [switch]$AttachProfiler,
+
     # Print usage and exit. -h is recognised as a short alias.
     [Alias('h')]
     [switch]$Help
@@ -84,7 +93,30 @@ $env:GODOT_BIN = "C:\Users\ivanz\Godot\godot-mp-modified\bin\godot.windows.edito
 # inside the gdUnit4-spawned Godot window for the duration of the run.
 $env:MONKENET_TEST = "1"
 
-# Default filter excludes the multi-process suite (MonkeNet.Tests.MultiProcess) —
+# Forward -AttachProfiler to QuantitativeTestBase via env var. Set explicitly
+# (not just when true) so a prior run's value doesn't bleed into a follow-up
+# run that doesn't pass the switch. The runtime reads MONKENET_TEST_PROFILE
+# and, when MONKENET_TEST_PROFILE_DIR is also set, writes a per-cell handshake
+# file the watcher picks up to auto-spawn dotnet-trace. No second terminal
+# required.
+$env:MONKENET_TEST_PROFILE = if ($AttachProfiler) { "1" } else { "0" }
+if ($AttachProfiler) {
+    # Fresh comm dir per invocation so a previous run's stale handshake files
+    # can't trip up the watcher. Place under $env:TEMP so the worktree's
+    # child processes inherit the same env var and write to the same dir we
+    # poll from here.
+    $profileDir = Join-Path $env:TEMP "monke-net-profile-$PID"
+    if (Test-Path $profileDir) { Remove-Item -Recurse -Force $profileDir }
+    New-Item -ItemType Directory -Path $profileDir | Out-Null
+    $env:MONKENET_TEST_PROFILE_DIR = $profileDir
+    Write-Host "[run-tests] AttachProfiler ON - comm dir=$profileDir"
+    Write-Host "[run-tests] traces will land in: $(Join-Path $PSScriptRoot 'tests\TestResults\profile-traces')"
+} else {
+    # Clear so a stale value from the parent shell isn't honoured.
+    Remove-Item Env:MONKENET_TEST_PROFILE_DIR -ErrorAction SilentlyContinue
+}
+
+# Default filter excludes the multi-process suite (MonkeNet.Tests.MultiProcess) -
 # those tests spawn separate Godot child processes and take significantly longer;
 # run them via run-multiprocess-tests.ps1 instead. When a -Test selector is
 # provided, the user is being explicit, so honor it as-is (even if it matches
@@ -95,7 +127,7 @@ if ($Test) {
     $filter = "FullyQualifiedName!~MonkeNet.Tests.MultiProcess"
 }
 
-# ── Worktree path ─────────────────────────────────────────────────────────
+# ?? Worktree path ?????????????????????????????????????????????????????????
 # Delegate to the shared helper. Same isolation mechanism as
 # run-multiprocess-tests.ps1 -Worktree, just a different default filter.
 if ($Worktree) {
@@ -109,6 +141,22 @@ if ($Worktree) {
 }
 
 $proc = Start-Process -FilePath "dotnet" -ArgumentList "test tests/MonkeNetTests.csproj --logger console;verbosity=normal --filter $filter" -RedirectStandardOutput "test-output.log" -RedirectStandardError "test-error.log" -NoNewWindow -PassThru
+
+if ($AttachProfiler) {
+    # Same watcher as the worktree path. Auto-spawns dotnet-trace for each
+    # cell that signals via the comm dir handshake.
+    & (Join-Path $PSScriptRoot "tools\Watch-AttachProfiler.ps1") `
+        -Process     $proc `
+        -CommDir     $env:MONKENET_TEST_PROFILE_DIR `
+        -TraceOutDir (Join-Path $PSScriptRoot "tests\TestResults\profile-traces") `
+        -TimeoutMs   540000
+    if (-not $proc.HasExited) {
+        if (-not $proc.WaitForExit(5000)) { $proc.Kill($true); $exit = 1 }
+        else { $exit = $proc.ExitCode }
+    } else { $exit = $proc.ExitCode }
+    Get-Content "test-output.log"
+    exit $exit
+}
 
 if (-not $proc.WaitForExit(540000)) {
     Write-Host "Timeout reached - killing test process"

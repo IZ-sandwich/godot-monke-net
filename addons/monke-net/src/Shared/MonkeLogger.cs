@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Runtime.CompilerServices;
 using Godot;
 
 namespace MonkeNet.Shared;
@@ -80,15 +81,44 @@ public partial class MonkeLogger : Node
     public static void Warn(string message) => Log("WARN", message);
     public static void Error(string message) => Log("ERROR", message);
 
+    /// <summary>Fast static-property check that mirrors the autoload's
+    /// <see cref="DebugEnabled"/> toggle. Safe when the autoload isn't in the
+    /// tree (returns false). Used both by the interpolated-string handler to
+    /// short-circuit placeholder evaluation and by callers that want to gate
+    /// expensive log message construction by hand.</summary>
+    public static bool IsDebugEnabled => Instance != null && Instance.DebugEnabled;
+
     /// <summary>
-    /// Emits a debug-level log line, but only when <see cref="DebugEnabled"/> is true on
-    /// the autoload instance. Safe to call from anywhere — no-op when the autoload isn't
-    /// in the tree (e.g. headless test setups that don't load MainScene).
+    /// Emits a debug-level log line. The interpolated-string overload below is
+    /// the one the compiler picks for any <c>Debug($"...{x}...")</c> call site;
+    /// this string-only overload exists for the rare callers that pass a
+    /// pre-built or constant string. Both bail out when
+    /// <see cref="DebugEnabled"/> is false on the autoload.
     /// </summary>
     public static void Debug(string message)
     {
-        if (Instance == null || !Instance.DebugEnabled) return;
+        if (!IsDebugEnabled) return;
         Log("DEBUG", message);
+    }
+
+    /// <summary>
+    /// Interpolated-string overload of <see cref="Debug(string)"/>. The C# 10+
+    /// custom-handler pattern — <see cref="MonkeLoggerDebugHandler"/>'s
+    /// constructor checks <see cref="IsDebugEnabled"/> FIRST and reports the
+    /// answer via the <c>out bool isEnabled</c>; when it's false the compiler
+    /// skips every <c>AppendLiteral</c>/<c>AppendFormatted</c> call entirely,
+    /// so the placeholder expressions in <c>$"...{x}..."</c> are never
+    /// evaluated and no string is allocated. Cost on the disabled path: ~3 ns
+    /// (one bool comparison), zero allocation. See
+    /// https://learn.microsoft.com/dotnet/csharp/advanced-topics/performance/interpolated-string-handler
+    /// </summary>
+    public static void Debug([InterpolatedStringHandlerArgument] MonkeLoggerDebugHandler handler)
+    {
+        // Handler short-circuits placeholder evaluation when disabled, but the
+        // method body still runs — guard so we don't call Log("DEBUG", "") on
+        // the disabled path.
+        if (!IsDebugEnabled) return;
+        Log("DEBUG", handler.ToStringAndClear());
     }
 
     private static int _markCounter = 0;
@@ -105,6 +135,54 @@ public partial class MonkeLogger : Node
         int id = System.Threading.Interlocked.Increment(ref _markCounter);
         string suffix = string.IsNullOrEmpty(label) ? "" : $" label='{label}'";
         Log("MARK", $"#{id} tick={tick}{suffix}");
+    }
+
+    /// <summary>Quote a delegate so the cost of constructing a long debug
+    /// string is paid only when the level is enabled, while still letting the
+    /// call site use ordinary <c>$"…"</c> syntax. The compiler rewrites
+    /// <c>MonkeLogger.Debug($"x={x}")</c> into a sequence of calls on this
+    /// type; if <see cref="MonkeLogger.IsDebugEnabled"/> is false at the
+    /// moment the call site runs, the <c>isEnabled</c> out parameter reports
+    /// false and the compiler-generated wrapper skips every
+    /// <c>AppendLiteral</c>/<c>AppendFormatted</c> call, leaving the inner
+    /// <see cref="DefaultInterpolatedStringHandler"/> as <c>default</c> (no
+    /// buffer rented, no allocation).
+    /// <para>
+    /// <c>ref struct</c> is fine here: log call sites never <c>await</c> or
+    /// store the handler, and stack-only allocation keeps the disabled-path
+    /// cost to a single bool comparison + a few field writes.
+    /// </para>
+    /// </summary>
+    [InterpolatedStringHandler]
+    public ref struct MonkeLoggerDebugHandler
+    {
+        private DefaultInterpolatedStringHandler _inner;
+
+        public MonkeLoggerDebugHandler(int literalLength, int formattedCount, out bool isEnabled)
+        {
+            isEnabled = MonkeLogger.IsDebugEnabled;
+            _inner = isEnabled
+                ? new DefaultInterpolatedStringHandler(literalLength, formattedCount)
+                : default;
+        }
+
+        // Forward every overload the C# compiler may emit to the BCL's
+        // DefaultInterpolatedStringHandler. The compiler picks the most-
+        // specific overload at the call site; missing overloads cause CS1502
+        // ("no overload matches the format specifier") so list them all.
+        public void AppendLiteral(string value)                                  => _inner.AppendLiteral(value);
+        public void AppendFormatted<T>(T value)                                  => _inner.AppendFormatted(value);
+        public void AppendFormatted<T>(T value, string format)                   => _inner.AppendFormatted(value, format);
+        public void AppendFormatted<T>(T value, int alignment)                   => _inner.AppendFormatted(value, alignment);
+        public void AppendFormatted<T>(T value, int alignment, string format)    => _inner.AppendFormatted(value, alignment, format);
+        public void AppendFormatted(ReadOnlySpan<char> value)                    => _inner.AppendFormatted(value);
+        public void AppendFormatted(ReadOnlySpan<char> value, int alignment = 0, string format = null)
+            => _inner.AppendFormatted(value, alignment, format);
+        public void AppendFormatted(string value)                                => _inner.AppendFormatted(value);
+        public void AppendFormatted(string value, int alignment = 0, string format = null)
+            => _inner.AppendFormatted(value, alignment, format);
+
+        public string ToStringAndClear() => _inner.ToStringAndClear();
     }
 
     private static void Log(string level, string message)

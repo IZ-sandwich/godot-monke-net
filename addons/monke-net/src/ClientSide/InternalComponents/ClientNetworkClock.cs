@@ -134,13 +134,15 @@ public partial class ClientNetworkClock : InternalClientComponent
     private void SyncReceived(ClockSyncMessage sync)
     {
         // Latency as the difference between when the packet was sent and when it came back divided by 2.
-        _immediateLatencyMsec = (GetLocalTimeMs() - sync.ClientTime) / 2;
+        int rttMsec = GetLocalTimeMs() - sync.ClientTime;
+        _immediateLatencyMsec = rttMsec / 2;
         int immediateLatencyInTicks = PhysicsUtils.MsecToTick(_immediateLatencyMsec);
 
         // Time difference between our clock and the server clock accounting for latency.
         int immediateOffsetInTicks = (sync.ServerTime - _currentTick) + immediateLatencyInTicks;
 
         _samplesReceived++;
+        MonkeLogger.Debug($"[CLOCK-SYNC-RX] sample={_samplesReceived} rttMs={rttMsec} halfRttMs={_immediateLatencyMsec} halfRttTicks={immediateLatencyInTicks} srvTick={sync.ServerTime} cliTick={_currentTick} immediateOffset={immediateOffsetInTicks}");
 
         // Min-RTT filter (NTP best-of-N): keep last _sampleSize latency samples
         // and use the MINIMUM as the smoothed latency estimate. Network jitter
@@ -159,6 +161,7 @@ public partial class ClientNetworkClock : InternalClientComponent
         }
         _averageLatencyInTicks = System.Math.Max(_minLatencyInTicks, minLatency);
         _jitterInTicks = System.Math.Max(0, maxLatency - minLatency);
+        MonkeLogger.Debug($"[CLOCK-SYNC-STATE] window={_recentLatencies.Count} minLatTicks={minLatency} maxLatTicks={maxLatency} avgLatTicksUsed={_averageLatencyInTicks} jitterTicks={_jitterInTicks}");
 
         // Photon-Fusion-2-style coarse correction: when a single sample
         // estimates a large clock offset, apply it IMMEDIATELY to _currentTick

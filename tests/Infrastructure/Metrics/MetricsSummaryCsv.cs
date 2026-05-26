@@ -26,14 +26,35 @@ public sealed class MetricsSummaryCsv
     /// <summary>Compute the canonical per-run folder name for a quantitative-
     /// suite invocation: <c>{date}--{time}.{shortCommit}[+dirty]</c>, e.g.
     /// <c>2026-05-20--04-15-17.191b9ab+dirty</c>. Used by the runner to root
-    /// every artifact (CSV, SVGs, MP4s, logs) under one directory.</summary>
+    /// every artifact (CSV, SVGs, MP4s, logs) under one directory.
+    ///
+    /// <para>Source of the commit + dirty info: <c>MONKENET_RUN_COMMIT</c> /
+    /// <c>MONKENET_RUN_DIRTY</c> env vars first, then fall back to running
+    /// <c>git</c> in <paramref name="repoRoot"/>. The env-var path exists so
+    /// <c>Invoke-TestInWorktree.ps1</c> can capture the originating-tree's
+    /// commit in the outer shell and propagate it into the worktree copy
+    /// (which excludes <c>.git</c>); without it, the worktree's git lookup
+    /// returns "unknown".</para></summary>
     public static string RunFolderName(string repoRoot)
     {
-        string commitFull = RunGit(repoRoot, "rev-parse HEAD") ?? "unknown";
+        (string commitFull, bool dirty) = ResolveCommitAndDirty(repoRoot);
         string commitShort = commitFull.Length >= 7 ? commitFull.Substring(0, 7) : commitFull;
-        bool dirty = !string.IsNullOrWhiteSpace(RunGit(repoRoot, "status --porcelain") ?? "");
         string timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd--HH-mm-ss", CultureInfo.InvariantCulture);
         return $"{timestamp}.{commitShort}{(dirty ? "+dirty" : "")}";
+    }
+
+    private static (string commitFull, bool dirty) ResolveCommitAndDirty(string repoRoot)
+    {
+        string envCommit = Environment.GetEnvironmentVariable("MONKENET_RUN_COMMIT");
+        string envDirty  = Environment.GetEnvironmentVariable("MONKENET_RUN_DIRTY");
+        if (!string.IsNullOrWhiteSpace(envCommit))
+        {
+            bool d = string.Equals(envDirty, "true", StringComparison.OrdinalIgnoreCase);
+            return (envCommit.Trim(), d);
+        }
+        string commit = RunGit(repoRoot, "rev-parse HEAD") ?? "unknown";
+        bool dirty = !string.IsNullOrWhiteSpace(RunGit(repoRoot, "status --porcelain") ?? "");
+        return (commit, dirty);
     }
 
     /// <summary>Writes the summary CSV into <paramref name="directory"/> as the
@@ -42,10 +63,19 @@ public sealed class MetricsSummaryCsv
     {
         Directory.CreateDirectory(directory);
 
-        string commitFull = RunGit(repoRoot, "rev-parse HEAD") ?? "unknown";
-        string branch = RunGit(repoRoot, "rev-parse --abbrev-ref HEAD") ?? "unknown";
-        string dirtyList = RunGit(repoRoot, "status --porcelain") ?? "";
-        bool dirty = !string.IsNullOrWhiteSpace(dirtyList);
+        // Prefer env vars (set by Invoke-TestInWorktree.ps1 from the outer
+        // source tree) over running git in the current directory — see the
+        // RunFolderName docstring for why.
+        string envCommit   = Environment.GetEnvironmentVariable("MONKENET_RUN_COMMIT");
+        string envBranch   = Environment.GetEnvironmentVariable("MONKENET_RUN_BRANCH");
+        string envDirtyL   = Environment.GetEnvironmentVariable("MONKENET_RUN_DIRTY_LIST");
+        string envDirty    = Environment.GetEnvironmentVariable("MONKENET_RUN_DIRTY");
+        string commitFull  = !string.IsNullOrWhiteSpace(envCommit) ? envCommit.Trim() : (RunGit(repoRoot, "rev-parse HEAD") ?? "unknown");
+        string branch      = !string.IsNullOrWhiteSpace(envBranch) ? envBranch.Trim() : (RunGit(repoRoot, "rev-parse --abbrev-ref HEAD") ?? "unknown");
+        string dirtyList   = envDirtyL ?? (RunGit(repoRoot, "status --porcelain") ?? "");
+        bool dirty         = !string.IsNullOrWhiteSpace(envCommit)
+            ? string.Equals(envDirty, "true", StringComparison.OrdinalIgnoreCase)
+            : !string.IsNullOrWhiteSpace(dirtyList);
 
         string path = Path.Combine(directory, "summary.csv");
 

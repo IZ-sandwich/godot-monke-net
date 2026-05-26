@@ -102,21 +102,29 @@ public sealed class S7_MultiBodyChaos : IScenario
         // 240 ticks (4 s) gives stacked bodies time to fully sleep.
         server.WaitForTicks(240);
 
-        // Frame the camera on the player so the recorded MP4 follows the
-        // action. The harness only installs an observer camera in windowed
-        // (video-recording) mode, so this command errors on headless clients
-        // — swallow the failure so non-video runs don't break.
+        // Park the camera at a fixed world position pointed at the centre of
+        // the pile. A follow-camera was hiding the very artifact this test
+        // exists to diagnose — when the camera tracks the player, any
+        // teleport / smoother offset translates the *background* relative to
+        // the player rather than the player relative to the world, so a
+        // viewer cannot read forward/backward motion from the player's
+        // on-screen pixels alone. With a static camera the player's pixel
+        // position IS the world Z (modulo perspective) and rollback snaps
+        // become unmistakable.
+        //
+        // The harness only installs an observer camera in windowed
+        // (video-recording) mode, so these commands error on headless
+        // clients — swallow failures so non-video runs don't break.
         try
         {
             client.Send(new
             {
-                cmd = "camera-follow-entity",
-                entity_id = _playerId,
-                offset = new[] { 8.0, 5.0, 8.0 },
-                lookOffset = new[] { 0.0, 0.5, 0.0 },
+                cmd = "set-camera",
+                position = new[] { 12.0, 4.0, 5.0 },
+                lookAt = new[] { 0.0, -1.0, 4.0 },
             });
         }
-        catch { /* headless: no camera to follow with */ }
+        catch { /* headless: no camera to set */ }
     }
 
     public void Run(TestProcess server, TestProcess client, SyncMetrics metrics)

@@ -64,7 +64,8 @@ public class MultiProcessOrchestrator : IDisposable
 
     public TestProcess Spawn(string role, int enetPort, string label = null,
         string serverAddr = "127.0.0.1", string recordVideoPath = null,
-        string clientPersistentId = null, string scenePath = null)
+        string clientPersistentId = null, string scenePath = null,
+        bool deferVideoStart = false)
     {
         int orchPort = NextOrchPort();
         label ??= role;
@@ -137,6 +138,12 @@ public class MultiProcessOrchestrator : IDisposable
             args.Add($"--client-id={id}");
         }
         if (recordVideoPath != null) args.Add($"--record-video={recordVideoPath}");
+        // Defer recorder construction until the orchestrator issues
+        // "start-recording". Used by the quantitative suite so the captured MP4
+        // doesn't include the cold-start clock-sync window — the recorder is
+        // started right before scenario.Setup, so the video begins just before
+        // entities spawn instead of ~10 s of empty viewport.
+        if (deferVideoStart && recordVideoPath != null) args.Add("--defer-video-start");
 
         var psi = new ProcessStartInfo(_godotBin)
         {
