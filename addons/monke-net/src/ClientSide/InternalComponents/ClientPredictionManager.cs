@@ -78,6 +78,19 @@ public partial class ClientPredictionManager : InternalClientComponent
     /// assert misprediction budgets after driving a known input pattern.
     /// </summary>
     public int MispredictionsCount => _misspredictionsCount;
+    /// <summary>
+    /// Count of mispredictions absorbed by the per-entity Interpolate-tier blend path
+    /// (see <see cref="ClientPredictedEntity.HandleInterpolateReconciliation"/>). These
+    /// are NOT full-scene rollbacks — the body is gently nudged toward the snapshot pose
+    /// over a few ticks. Surfaced for the T1 two-tier test to verify drift on idle props
+    /// is being absorbed by blends rather than the rollback path.
+    /// </summary>
+    public int InterpolateReconcileCount => _interpolateReconcileCount;
+    private int _interpolateReconcileCount = 0;
+    // Per-entity last-reported EffectiveTier, used by NoteTierIfChanged to detect
+    // edges. Held on the manager rather than the entity so the entity stays
+    // tick-agnostic — the manager owns the per-tick polling.
+    private readonly Dictionary<int, PredictionTier> _lastReportedTierByEid = [];
     /// <summary>Per-class mispredict count: server-side impulses or remote-player collisions
     /// the client didn't replay. The user-visible class — these are the mispredicts that
     /// actually matter for sync quality.</summary>
@@ -213,6 +226,7 @@ public partial class ClientPredictionManager : InternalClientComponent
         _initializedEntityIds.Remove(entityId);
         _remoteEntitiesAwaitingInput.Remove(entityId);
         _entitiesEverHadInput.Remove(entityId);
+        _lastReportedTierByEid.Remove(entityId);
     }
 
     protected override void OnCommandReceived(IPackableMessage command)
@@ -437,6 +451,25 @@ public partial class ClientPredictionManager : InternalClientComponent
                 : ResolveRemoteInput(entity.EntityId, tick);
             clientPredictedEntity.OnProcessTick(tick, perEntityInput);
         });
+
+        // T1 hysteresis pump. Run AFTER OnProcessTick so any per-tick contact
+        // detection driven from a player's tick path (which lives in
+        // OnPostPhysicsTick, but the hysteresis must outlive the contact tick
+        // by N) has had a chance to refresh the upgrade. Counter decrements
+        // back toward zero each tick; an entity continuously contacted by the
+        // local player never falls below 1 because the player keeps re-arming
+        // it. NoteTierIfChanged is what produces the [TIER-SWITCH] log line
+        // and bumps TierSwitchCount/LastTierSwitchTick for diagnostics.
+        EntitySpawner.Instance.ClientEntities.ForEach(entity =>
+        {
+            var cpe = entity.GetComponent<ClientPredictedEntity>();
+            if (cpe == null) return;
+            cpe.TickTierHysteresis();
+            if (!_lastReportedTierByEid.TryGetValue(cpe.EntityId, out var prev))
+                prev = cpe.BaseTier;
+            cpe.NoteTierIfChanged(tick, ref prev);
+            _lastReportedTierByEid[cpe.EntityId] = prev;
+        });
     }
 
     /// <summary>
@@ -604,6 +637,44 @@ public partial class ClientPredictionManager : InternalClientComponent
             Vector3 posDiff = authPos - predictedState.Position;
             MonkeLogger.Debug($"[PRED-CHECK] tick={receivedSnapshot.Tick} eid={predictableEntity.EntityId} predPos=({predictedState.Position.X:F3},{predictedState.Position.Y:F3},{predictedState.Position.Z:F3}) authPos=({authPos.X:F3},{authPos.Y:F3},{authPos.Z:F3}) |posDiff|={posDiff.Length():F4}m predVel=({predictedState.LinearVelocity.X:F3},{predictedState.LinearVelocity.Y:F3},{predictedState.LinearVelocity.Z:F3})");
 
+            // Interpolate tier: blend toward the snapshot pose on EVERY snapshot,
+            // regardless of drift magnitude. The HasMisspredicted threshold gate
+            // is a Resim-tier optimisation (skip expensive rollback for tiny
+            // drift); it does NOT apply here because the blend is cheap and
+            // gating it produces a visible bug — sub-threshold drift (under 0.2 m)
+            // is left uncorrected, the local Jolt keeps integrating, and by the
+            // time a cube comes to rest its pose can be 10–20 cm off the
+            // authoritative pose. The subsequent SnapToRest then yanks the body
+            // to server pose without smoother compensation, producing a visible
+            // snap. Always-blend keeps the body within blend-lag (≤ snapshot
+            // interval) of authoritative at all times, so SnapToRest is a no-op
+            // when the cube finally settles. Contact-upgraded props flip to
+            // Resim and skip this branch — the player still gets crisp local
+            // physics on the bodies they're actually touching.
+            //
+            // _interpolateReconcileCount keeps its existing semantics — count
+            // of blend writes — but it now scales with snapshot rate × prop
+            // count, not with drift events. Tests that asserted "> 0" still
+            // pass; tests that asserted a tight budget would need adjustment
+            // (none currently exist).
+            if (predictableEntity.EffectiveTier == PredictionTier.Interpolate)
+            {
+                _interpolateReconcileCount++;
+                MonkeLogger.Debug($"[PRED-CHECK] tick={receivedSnapshot.Tick} eid={predictableEntity.EntityId} -> blend-reconcile (tier=Interpolate, |posDiff|={posDiff.Length():F4}m)");
+                predictableEntity.HandleInterpolateReconciliation(authoritativeState);
+                // ApplyAuthoritativeNonPoseState still runs so SyncSleepState
+                // can mirror the server's sleep flag — but with the body
+                // already at authoritative pose from the blend, SnapToRest
+                // hits its sub-mm noop path and doesn't write the transform.
+                predictableEntity.ApplyAuthoritativeNonPoseState(authoritativeState);
+                continue;
+            }
+
+            // Resim tier: threshold-gated full-scene rollback. The 0.2 m / 1 m/s
+            // gate exists because rollback re-simulates every body in the
+            // physics space for _predictedStates.Count ticks — expensive enough
+            // that sub-threshold drift is intentionally tolerated and absorbed
+            // by PredictionVisualSmoothing3D on the visual mesh.
             if (predictableEntity.HasMisspredicted(receivedSnapshot.Tick, authoritativeState, predictedState))
             {
                 _misspredictionsCount++;
@@ -616,20 +687,14 @@ public partial class ClientPredictionManager : InternalClientComponent
                     case "physics-nondeterminism":  _mispredictsPhysicsNondeterminism++; break;
                     case "degraded-network":        _mispredictsDegradedNetwork++; break;
                 }
-                MonkeLogger.Debug($"[PRED-CHECK] tick={receivedSnapshot.Tick} eid={predictableEntity.EntityId} MISPREDICTED -> rollback (class={cause})");
                 LogMispredictionThrottled(predictableEntity, predictedState, authoritativeState, receivedSnapshot.Tick, networkDegraded);
+                MonkeLogger.Debug($"[PRED-CHECK] tick={receivedSnapshot.Tick} eid={predictableEntity.EntityId} MISPREDICTED -> rollback (tier=Resim, class={cause})");
                 RollbackAndResimulate(receivedSnapshot.States, predictedStateData);
                 return;
             }
 
-            // Below the hard reconcile threshold — no body teleport needed.
-            // But entities can still react to the snapshot for non-pose state
-            // sync (e.g. sleep-state coherence on cubes: the client's Jolt may
-            // have woken a body that the server has settled, and that wake
-            // produces a tiny per-tick drift that won't trip HasMisspredicted
-            // for a long time. ApplyAuthoritativeNonPoseState lets each
-            // entity sync any such auxiliary state every snapshot without
-            // touching the body's transform).
+            // Resim, below threshold — no body teleport needed; just sync
+            // auxiliary state (sleep flag, etc.) from the snapshot.
             MonkeLogger.Debug($"[PRED-CHECK] tick={receivedSnapshot.Tick} eid={predictableEntity.EntityId} OK");
             predictableEntity.ApplyAuthoritativeNonPoseState(authoritativeState);
         }

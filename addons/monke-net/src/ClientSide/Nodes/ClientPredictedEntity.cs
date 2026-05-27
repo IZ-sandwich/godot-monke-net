@@ -4,9 +4,194 @@ using MonkeNet.Shared;
 
 namespace MonkeNet.Client;
 
+/// <summary>
+/// Two-tier classification for predicted entities, mirroring UE5's
+/// PredictiveInterpolation split. <see cref="Resim"/> entities use the
+/// classic full-scene rollback flow on any misprediction (current behaviour).
+/// <see cref="Interpolate"/> entities are NOT rollbacked when they
+/// mispredict — instead the snapshot pose/vel becomes a blend target that
+/// <see cref="ClientPredictedEntity.HandleInterpolateReconciliation"/>
+/// applies smoothly over a few ticks, absorbing cross-process Jolt drift
+/// on idle props without paying the rollback cost. The locally-owned
+/// player upgrades touched entities to effective Resim for a hysteresis
+/// window so contact interaction stays crisp.
+/// </summary>
+public enum PredictionTier
+{
+    Resim,
+    Interpolate,
+}
+
+/// <summary>
+/// Decides how an Interpolate-tier entity transitions to Resim (and back) over
+/// a player interaction. The current 15-tick "tick-counted hysteresis" is one
+/// design point; the industry splits across this, snapshot-gated release
+/// (UE5 PredictiveInterpolation), authority transfer (Fusion 2 / coherence),
+/// and "always predict everything" (Netick Rocket Cars). Isolating the choice
+/// as a per-entity policy lets each prop opt into whichever model suits its
+/// gameplay role without a global engine change.
+/// </summary>
+public enum InterpolationPolicy
+{
+    /// <summary>
+    /// Default. Contact upgrades to Resim for a fixed N-tick window (default
+    /// 15 = 250 ms at 60 Hz); reverts to <see cref="ClientPredictedEntity.BaseTier"/>
+    /// when the counter hits zero. Cheap, no per-body server-ack tracking
+    /// needed; the cost is the arbitrary window length (a prop that's been
+    /// kicked but is still flying may revert to Interpolate while visibly in
+    /// motion).
+    /// </summary>
+    Hysteresis,
+    /// <summary>
+    /// No tier flip — <see cref="ClientPredictedEntity.EffectiveTier"/> is
+    /// always <see cref="PredictionTier.Resim"/>, regardless of
+    /// <see cref="ClientPredictedEntity.BaseTier"/> or contact history. Every
+    /// snapshot drift triggers a full rollback. Matches the
+    /// "always-predict-everything" pattern (Netick Rocket Cars, lightyear
+    /// avian_physics) for bodies that must feel maximally responsive at the
+    /// cost of more rollback work.
+    /// </summary>
+    AlwaysPredict,
+    // Future:
+    // SnapshotGated   — hold Resim until next in-tolerance server snapshot
+    //                   (UE5 post_resim_wait_for_update pattern). Replaces
+    //                   the arbitrary tick window with evidence-of-convergence.
+    // AuthorityTransfer — local client takes state authority on contact and
+    //                   releases on explicit signal (Fusion 2 / coherence
+    //                   model). Different semantics — local sim IS the truth
+    //                   while held, not a prediction.
+}
+
 [GlobalClass, Icon("res://addons/monke-net/resources/circle_nodes_solid.png")]
 public partial class ClientPredictedEntity : ClientNetworkBehaviour
 {
+    /// <summary>
+    /// Static classification for this entity. Default <see cref="PredictionTier.Resim"/>
+    /// preserves the pre-T1 behaviour for every existing entity — only entities that
+    /// explicitly opt in (props, ambient bodies) flip to <see cref="PredictionTier.Interpolate"/>.
+    /// Subclasses can set this in <c>_Ready</c> to override the default before the
+    /// prediction manager reads <see cref="EffectiveTier"/>.
+    ///
+    /// Ignored when <see cref="Policy"/> is <see cref="InterpolationPolicy.AlwaysPredict"/>
+    /// — that policy short-circuits to <see cref="PredictionTier.Resim"/> regardless.
+    /// </summary>
+    [Export] public PredictionTier BaseTier { get; set; } = PredictionTier.Resim;
+
+    /// <summary>
+    /// Selects how <see cref="EffectiveTier"/> transitions on player contact.
+    /// See <see cref="InterpolationPolicy"/> for the trade-offs. Default
+    /// <see cref="InterpolationPolicy.Hysteresis"/> matches the original T1
+    /// behaviour.
+    /// </summary>
+    [Export] public InterpolationPolicy Policy { get; set; } = InterpolationPolicy.Hysteresis;
+
+    // Hysteresis countdown for contact-driven upgrades to Resim. When > 0, the
+    // entity reports Resim regardless of BaseTier; decremented once per physics
+    // tick by ClientPredictionManager via TickTierHysteresis() AFTER contact
+    // detection has had a chance to refresh it. Critically, the upgrade is
+    // applied the SAME tick contact is detected (see RequestResimUpgrade) so the
+    // misprediction check that runs after the snapshot arrives uses Resim
+    // semantics — without same-tick effect, the contact tick would still see
+    // Interpolate semantics and the body would visually lag the player's push.
+    //
+    // Only meaningful under InterpolationPolicy.Hysteresis. AlwaysPredict
+    // ignores this field entirely; its EffectiveTier short-circuits to Resim.
+    private int _resimUpgradeTicksRemaining;
+
+    /// <summary>
+    /// Tier in effect for the current tick. The active <see cref="Policy"/>
+    /// decides how this is computed; read by <see cref="ClientPredictionManager"/>
+    /// when routing mispredictions.
+    /// </summary>
+    public PredictionTier EffectiveTier => Policy switch
+    {
+        InterpolationPolicy.AlwaysPredict => PredictionTier.Resim,
+        InterpolationPolicy.Hysteresis    => _resimUpgradeTicksRemaining > 0 ? PredictionTier.Resim : BaseTier,
+        _                                 => BaseTier,
+    };
+
+    /// <summary>
+    /// Called by the locally-owned player when its body comes into contact with this
+    /// entity's body. Takes effect IMMEDIATELY — the very next read of
+    /// <see cref="EffectiveTier"/> reports Resim, so the misprediction check that
+    /// runs on the snapshot arriving for the contact tick uses Resim semantics
+    /// (full rollback) rather than Interpolate (blend). Without same-tick effect
+    /// the player would briefly push through a body that's still blending toward
+    /// its snapshot pose.
+    ///
+    /// No-op under <see cref="InterpolationPolicy.AlwaysPredict"/> — that policy
+    /// is already Resim and has no hysteresis counter to bump.
+    /// </summary>
+    /// <param name="ticks">Hysteresis window. Default 15 = 250 ms at 60 Hz, long
+    /// enough to absorb a brief contact-loss bounce without flapping back to
+    /// Interpolate.</param>
+    public void RequestResimUpgrade(int ticks = 15)
+    {
+        if (Policy != InterpolationPolicy.Hysteresis) return;
+        var prev = EffectiveTier;
+        if (ticks > _resimUpgradeTicksRemaining) _resimUpgradeTicksRemaining = ticks;
+        var now = EffectiveTier;
+        if (now != prev) OnEffectiveTierChanged(prev, now);
+    }
+
+    /// <summary>
+    /// Decrement the contact-upgrade hysteresis. Called once per physics tick by
+    /// <see cref="ClientPredictionManager.Predict"/> AFTER contact detection has
+    /// had a chance to refresh the upgrade — so an entity in continuous contact
+    /// never drops below 1, but one tick of contact loss decrements toward
+    /// expiry.
+    ///
+    /// No-op under <see cref="InterpolationPolicy.AlwaysPredict"/> — there's
+    /// nothing to decrement; the entity is permanently Resim.
+    /// </summary>
+    public void TickTierHysteresis()
+    {
+        if (Policy != InterpolationPolicy.Hysteresis) return;
+        if (_resimUpgradeTicksRemaining <= 0) return;
+        var prev = EffectiveTier;
+        _resimUpgradeTicksRemaining--;
+        var now = EffectiveTier;
+        if (now != prev) OnEffectiveTierChanged(prev, now);
+    }
+
+    /// <summary>
+    /// Fires exactly once each time <see cref="EffectiveTier"/> flips. Default
+    /// no-op; subclasses override to react — e.g. <c>LocalRigidPropPrediction</c>
+    /// uses this to repaint its on-body tier indicator on tier change rather
+    /// than polling every frame. Called from <see cref="RequestResimUpgrade"/>
+    /// and <see cref="TickTierHysteresis"/>, so any UI side-effect runs once
+    /// per real transition (Interpolate→Resim on contact, Resim→Interpolate on
+    /// hysteresis expiry).
+    /// </summary>
+    protected virtual void OnEffectiveTierChanged(PredictionTier from, PredictionTier to) { }
+
+    /// <summary>Cumulative count of EffectiveTier transitions for this entity.
+    /// Surfaced via the multi-client harness "tier-state" cmd for tests that
+    /// assert the contact-upgrade + hysteresis behaviour.</summary>
+    public int TierSwitchCount { get; private set; }
+
+    /// <summary>Tick number of the most recent EffectiveTier transition. Used by
+    /// the contact-upgrade test to verify the upgrade happens within one tick
+    /// of the player touching the entity.</summary>
+    public int LastTierSwitchTick { get; private set; }
+
+    // Last EffectiveTier reported to NoteTierIfChanged. Held by the manager
+    // rather than the entity itself because the entity has no concept of "tick"
+    // — the manager passes the current tick when it polls. Kept as a separate
+    // ref-parameter dictionary entry on the manager side; on the entity we just
+    // expose the bump method below.
+    internal void NoteTierIfChanged(int tick, ref PredictionTier prevReported)
+    {
+        var now = EffectiveTier;
+        if (now != prevReported)
+        {
+            TierSwitchCount++;
+            LastTierSwitchTick = tick;
+            MonkeLogger.Debug($"[TIER-SWITCH] tick={tick} eid={EntityId} {prevReported}->{now} (count={TierSwitchCount})");
+            prevReported = now;
+        }
+    }
+
     public virtual void OnProcessTick(int tick, IPackableElement input) { }
 
     /// <summary>
@@ -36,6 +221,23 @@ public partial class ClientPredictedEntity : ClientNetworkBehaviour
     public virtual bool HasMisspredicted(int tick, IEntityStateData receivedState, RigidbodyState savedState) { return false; }
     public virtual void HandleReconciliation(IEntityStateData receivedState) { }
     public virtual void ResimulateTick(IPackableElement input) { }
+
+    /// <summary>
+    /// Called by <see cref="ClientPredictionManager"/> when this entity is in
+    /// <see cref="PredictionTier.Interpolate"/> tier and its snapshot
+    /// reconciliation indicates a miss. Default behaviour delegates to
+    /// <see cref="HandleReconciliation"/> — a hard snap to authoritative pose —
+    /// so an entity that simply opts into Interpolate without overriding still
+    /// gets the no-rollback property (the snap happens in the per-entity
+    /// reconcile path, no full-scene resim is fired). Entities that want a
+    /// smoother visual — e.g. <c>LocalRigidPropPrediction</c> — override this
+    /// to lerp body pose/vel toward the snapshot over several ticks instead
+    /// of teleporting.
+    /// </summary>
+    public virtual void HandleInterpolateReconciliation(IEntityStateData receivedState)
+    {
+        HandleReconciliation(receivedState);
+    }
 
     /// <summary>
     /// Position of the entity at the moment of registration. Used by the prediction

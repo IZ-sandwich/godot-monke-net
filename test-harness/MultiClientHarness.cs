@@ -473,6 +473,9 @@ public partial class MultiClientHarness : Node
                 "get-all-entities" => GetAllEntities(),
                 "get-entity" => GetEntity(doc.RootElement),
                 "mispredict-count" => MispredictCount(),
+                "interpolate-reconcile-count" => InterpolateReconcileCount(),
+                "tier-state" => TierState(),
+                "set-tier-icons" => SetTierIcons(doc.RootElement),
                 "mispredict-classification-counts" => MispredictClassificationCounts(),
                 "rollback-depth-sample" => RollbackDepthSample(),
                 "missed-input-count" => MissedInputCount(),
@@ -1050,6 +1053,65 @@ public partial class MultiClientHarness : Node
         if (cm == null) return Ok(new { count = 0 });
         var pm = FindChildOfType<ClientPredictionManager>(cm);
         return Ok(new { count = pm?.MispredictionsCount ?? 0 });
+    }
+
+    // T1 two-tier metric: count of mispredictions absorbed by the per-entity blend
+    // path (no full-scene rollback). Tests assert this grows on drift-only scenarios
+    // where MispredictionsCount and InterpolateReconcileCount should track 1:1 (every
+    // miss is on an Interpolate-tier entity, so every miss takes the blend branch).
+    private string InterpolateReconcileCount()
+    {
+        if (_role != "client") return Err("interpolate-reconcile-count is client-only");
+        var cm = ClientManager.Instance;
+        if (cm == null) return Ok(new { count = 0 });
+        var pm = FindChildOfType<ClientPredictionManager>(cm);
+        return Ok(new { count = pm?.InterpolateReconcileCount ?? 0 });
+    }
+
+    // T1 diagnostic toggle: flips the static ShowTierIcons flag on
+    // LocalRigidPropPrediction so every prop renders a small "R"/"I" Label3D
+    // hovering at its body centre. Multi-process tests turn this on right
+    // after the client comes up so recorded videos show tier transitions
+    // without needing log post-processing. Idempotent; can be flipped on/off
+    // mid-test.
+    private string SetTierIcons(System.Text.Json.JsonElement root)
+    {
+        bool enabled = root.TryGetProperty("enabled", out var e) && e.GetBoolean();
+        GameDemo.LocalRigidPropPrediction.ShowTierIcons = enabled;
+        // Repaint every already-spawned prop. Without this, props that
+        // existed BEFORE this toggle fires would never know to show/hide
+        // their icon — the event-driven repaint path only fires on actual
+        // tier transitions, and toggling visibility isn't a transition.
+        GameDemo.LocalRigidPropPrediction.RefreshAllIcons();
+        return Ok(new { enabled });
+    }
+
+    // T1 per-entity tier snapshot. Returns BaseTier + EffectiveTier + tier-switch
+    // counters for every ClientPredictedEntity currently in the scene. Polled by
+    // tests to verify (a) idle props stayed in their base Interpolate tier across
+    // a run, and (b) a contacted prop transitioned to Resim within one tick of
+    // contact (via LastSwitchTick).
+    private string TierState()
+    {
+        if (_role != "client") return Err("tier-state is client-only");
+        if (EntitySpawner.Instance == null) return Ok(new { entities = new List<object>() });
+        var entities = new List<object>();
+        foreach (var ent in EntitySpawner.Instance.ClientEntities)
+        {
+            var cpe = ent.GetComponent<ClientPredictedEntity>();
+            if (cpe == null) continue;
+            entities.Add(new Dictionary<string, object>
+            {
+                { "eid", ent.EntityId },
+                { "type", (int)ent.EntityType },
+                { "baseTier", cpe.BaseTier.ToString() },
+                { "policy", cpe.Policy.ToString() },
+                { "effectiveTier", cpe.EffectiveTier.ToString() },
+                { "switchCount", cpe.TierSwitchCount },
+                { "lastSwitchTick", cpe.LastTierSwitchTick },
+            });
+        }
+        return Ok(new { entities });
     }
 
     // Per-classification mispredict counts. The total mispredict count alone is

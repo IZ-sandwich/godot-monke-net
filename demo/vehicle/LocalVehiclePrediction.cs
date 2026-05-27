@@ -90,4 +90,33 @@ public partial class LocalVehiclePrediction : ClientPredictedEntity
     }
 
     public override void RestoreBodyState(RigidbodyState state) => _predictionRb.Reconcile(state);
+
+    public override void OnPostPhysicsTick(int tick, IPackableElement input)
+    {
+        // T1 contact-upgrade for vehicle-vs-prop interactions. The driver's
+        // process upgrades cubes its vehicle touches so the contact response
+        // stays crisp; an observer process ALSO runs this for the same reason
+        // — its locally-simulated copy of the (remote-driven) vehicle is
+        // predicting the same contact, and if the contacted cube stays in
+        // Interpolate tier the always-blend path tugs the cube toward server
+        // pose every snapshot, perturbing the vehicle's contact resolution
+        // and tripping vehicle rollbacks (the Resim threshold on the vehicle
+        // is 20 cm, easily crossed when the cube is repositioned mid-contact).
+        // Running the upgrade on BOTH driver and observer keeps the cubes
+        // synchronised with whichever side is locally simulating contact with
+        // them. The observer's local vehicle sim WILL diverge from the
+        // server's, and contact-upgraded cubes will sometimes rollback —
+        // that's the correct cost, far less disruptive than per-snapshot
+        // cube body writes mid-contact.
+        var body = _predictionRb?.Body;
+        if (body == null) return;
+        var contactBodies = RigidPlayerPhysics.QueryContactBodies(body);
+        if (contactBodies.Count == 0) return;
+        foreach (var cb in contactBodies)
+        {
+            var cpe = LocalRigidPlayerPrediction.FindOwningPredictedEntity(cb);
+            if (cpe != null && cpe != this)
+                cpe.RequestResimUpgrade();
+        }
+    }
 }

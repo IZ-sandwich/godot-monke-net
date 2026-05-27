@@ -174,6 +174,13 @@ public abstract class MultiProcessTestBase
         int clientNetId = client.NetworkId;
         AssertThat(clientNetId).OverrideFailureMessage("client must have a non-zero ENet peer id").IsNotEqual(0);
 
+        // Per-prop tier icons are on by default in tests so recorded videos
+        // make tier transitions self-evident. Gameplay defaults off — see
+        // LocalRigidPropPrediction.ShowTierIcons. Flip on both the driver and
+        // the observer; the observer's video should show the same glyphs.
+        EnableTierIcons(client);
+        EnableTierIcons(observer);
+
         // Park the observer idle from its current tick so it doesn't try to
         // generate inputs of its own. The harness's default input is already
         // zeroed, but installing an explicit schedule of one idle entry keeps
@@ -230,7 +237,22 @@ public abstract class MultiProcessTestBase
         int clientNetId = client.NetworkId;
         AssertThat(clientNetId).OverrideFailureMessage("client must have a non-zero ENet peer id").IsNotEqual(0);
 
+        // See SpawnTriad for the rationale on enabling tier icons by default
+        // in test runs.
+        EnableTierIcons(client);
+
         return (server, client);
+    }
+
+    /// <summary>Flip the per-prop tier indicator on for a client/observer
+    /// process. Tier icons are off in gameplay but on for tests so the
+    /// recorded video makes the R/I transitions easy to spot. Failures here
+    /// are swallowed — an older harness without the cmd shouldn't break
+    /// existing tests, it just means no glyphs in the recording.</summary>
+    protected static void EnableTierIcons(TestProcess proc)
+    {
+        try { proc.Send(new { cmd = "set-tier-icons", enabled = true }); }
+        catch { /* harness too old for this cmd; ignore */ }
     }
 
     /// <summary>Polls both processes' clock-state until the absolute gap

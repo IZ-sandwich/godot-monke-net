@@ -199,6 +199,13 @@ public class VehiclePushCubesTests : MultiProcessTestBase
         WaitForClockSync(server, observer, maxGapTicks: 5, timeoutMs: 5_000);
         steps.Log("clocks synced on both clients");
 
+        // Vehicle tests bypass SpawnTriad and manually wire spawn/wait/clock-
+        // sync, so they don't pick up the SpawnTriad EnableTierIcons defaults.
+        // Flip the per-prop tier indicator on explicitly so the recorded
+        // videos show R/I glyphs on cubes during the vehicle push/cycle.
+        EnableTierIcons(pusher);
+        EnableTierIcons(observer);
+
         server.WaitForTicks(SnapshotArmTicks);
 
         // ── spawn vehicle + cube stack + pusher player ──────────────────────

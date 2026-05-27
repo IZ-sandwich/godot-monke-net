@@ -229,6 +229,15 @@ public class MultiProcessOffsetPushTests : MultiProcessTestBase
         // Filtering by teleportSampleIndex matters because per-tick drift
         // injection on the server can cause mispredicts during the push phase
         // — those are unrelated to the teleport reconcile being measured here.
+        //
+        // Sample.MispredictionsCount only counts FULL-SCENE rollback events
+        // (Resim tier). Since cubes default to Interpolate tier under T1, the
+        // teleport reconcile takes the blend path and never bumps that counter
+        // — but the convergence assertion below still validates that the cube
+        // actually reached the new pose. The "did we observe a reconcile"
+        // signal therefore looks at the body-position trace itself: the first
+        // post-teleport sample where the client cube's X moves by at least
+        // half the teleport offset toward the new pose.
         if (teleportSampleIndex >= 0)
         {
             for (int i = teleportSampleIndex; i < clientSamples.Count; i++)
@@ -237,6 +246,36 @@ public class MultiProcessOffsetPushTests : MultiProcessTestBase
                 {
                     reconcileSampleIndex = i;
                     break;
+                }
+            }
+            // Fallback path for the T1 Interpolate-tier branch: detect the
+            // reconcile by observing the client cube's X position move toward
+            // the target by at least half the teleport offset.
+            if (reconcileSampleIndex < 0)
+            {
+                float teleportCubeX = float.NaN;
+                foreach (var e in clientSamples[teleportSampleIndex].Entities)
+                {
+                    if (e.Id == cubeEid) { teleportCubeX = e.Position.X; break; }
+                }
+                if (!float.IsNaN(teleportCubeX))
+                {
+                    for (int i = teleportSampleIndex + 1; i < clientSamples.Count; i++)
+                    {
+                        foreach (var e in clientSamples[i].Entities)
+                        {
+                            if (e.Id != cubeEid) continue;
+                            float deltaX = e.Position.X - teleportCubeX;
+                            // Half the teleport offset = we observed at least
+                            // one blend tick worth of convergence.
+                            if (Mathf.Abs(deltaX) >= 0.5f * Mathf.Abs(TeleportOffsetX))
+                            {
+                                reconcileSampleIndex = i;
+                                break;
+                            }
+                        }
+                        if (reconcileSampleIndex >= 0) break;
+                    }
                 }
             }
         }

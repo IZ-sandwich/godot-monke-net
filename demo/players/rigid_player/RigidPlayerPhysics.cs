@@ -216,6 +216,54 @@ public static class RigidPlayerPhysics
         public Vector3 Position;
     }
 
+    /// <summary>
+    /// Returns the live RigidBody3D references this body is currently overlapping.
+    /// Same query plumbing as <see cref="QueryContacts"/> (shape cast against the
+    /// body's own collision mask, excluding itself) but exposes the actual
+    /// collider Godot objects rather than just names, so the caller can walk up
+    /// the scene tree to the owning ClientPredictedEntity and upgrade it to
+    /// Resim tier. Marked <c>internal</c> so the prediction-side caller in the
+    /// same assembly (<see cref="LocalRigidPlayerPrediction"/>) can use it
+    /// without exposing the contact-list internals to demo gameplay code that
+    /// shouldn't reach into the player's physics.
+    /// </summary>
+    internal static System.Collections.Generic.List<RigidBody3D> QueryContactBodies(RigidBody3D body)
+    {
+        var hits = new System.Collections.Generic.List<RigidBody3D>();
+        if (body == null) return hits;
+        var space = body.GetWorld3D()?.DirectSpaceState;
+        if (space == null) return hits;
+
+        Node collisionShapeNode = null;
+        foreach (Node child in body.GetChildren())
+        {
+            if (child is CollisionShape3D cs && cs.Shape != null)
+            {
+                collisionShapeNode = cs;
+                break;
+            }
+        }
+        if (collisionShapeNode is not CollisionShape3D shapeNode) return hits;
+
+        var query = new PhysicsShapeQueryParameters3D
+        {
+            Shape = shapeNode.Shape,
+            Transform = shapeNode.GlobalTransform,
+            CollisionMask = body.CollisionMask,
+            CollideWithBodies = true,
+            CollideWithAreas = false,
+            Exclude = new Godot.Collections.Array<Rid> { body.GetRid() },
+        };
+
+        var results = space.IntersectShape(query, maxResults: 8);
+        foreach (var hit in results)
+        {
+            if (hit.TryGetValue("collider", out var cv) && cv.AsGodotObject() is RigidBody3D rb)
+                hits.Add(rb);
+        }
+        return hits;
+    }
+
     // Shape query against the body's own collision mask, excluding itself, to find what
     // it's currently overlapping. Equivalent in spirit to CharacterBody3D's slide
     // collisions, but read pre-step (slides are only resolved during SpaceStep on a

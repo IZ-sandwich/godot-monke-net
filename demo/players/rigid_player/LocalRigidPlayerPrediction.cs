@@ -130,6 +130,72 @@ public partial class LocalRigidPlayerPrediction : ClientPredictedEntity
             RigidPlayerPhysics.LogPostPhysics(body, _lastAdvanceResult.PreVel, _lastAdvanceResult.QueuedImpulse, phase: "live");
         }
         _hasLastAdvanceResult = false;
+
+        // T1 contact-upgrade. Runs on BOTH the locally-owned player AND any
+        // observer-side player simulations. The driver's upgrade is the
+        // obvious case (we touch a cube → flip it to Resim so our contact
+        // stays crisp). The observer's upgrade matters too: the observer is
+        // locally simulating the remote player's contacts, and if a touched
+        // cube stays in Interpolate the always-blend path yanks it toward
+        // server pose every snapshot, perturbing the observer's player-vs-
+        // cube contact resolution and tripping player rollbacks. Running the
+        // upgrade on both sides keeps cubes synchronised with whichever
+        // process is locally simulating contact. The observer's player will
+        // mispredict more (it always does — stale-input prediction), but the
+        // CUBE side stays stable instead of being a spurious source of
+        // additional rollbacks.
+        //
+        // Same contact-query plumbing the diagnostic LogPostPhysics uses; for
+        // each body we touch, walk up the scene tree to the owning
+        // ClientEntities NetworkBehaviour, fetch its ClientPredictedEntity
+        // component, and request a hysteresis upgrade. The upgrade takes
+        // effect on this same tick (RequestResimUpgrade bumps the counter
+        // immediately) so any misprediction routed THIS tick uses Resim
+        // semantics — required so the player doesn't briefly push through a
+        // body still blending toward its snapshot pose.
+        if (body == null) return;
+        var contactBodies = RigidPlayerPhysics.QueryContactBodies(body);
+        if (contactBodies.Count == 0) return;
+        foreach (var cb in contactBodies)
+        {
+            var cpe = FindOwningPredictedEntity(cb);
+            if (cpe != null && cpe != this)
+                cpe.RequestResimUpgrade();
+        }
+    }
+
+    // Resolve a contact body back to its owning ClientPredictedEntity, if any.
+    // Demo entities are rooted at their RigidBody3D (the body IS the entity
+    // root, e.g. LocalCube is the body itself with the NetworkBehaviour as a
+    // child Node) — so a "walk up to find NetworkBehaviour" pass misses
+    // entirely because the NetworkBehaviour is BELOW the body, not above it.
+    // Use EntitySpawner.GetEntityRoot for the comparison: for every
+    // ClientEntity, ask the spawner for its root Node3D, and walk up from the
+    // collider checking ancestry against each root. The first match wins.
+    // Floors / offline geometry don't have an entity root in ClientEntities,
+    // so they return null and the upgrade silently no-ops.
+    internal static ClientPredictedEntity FindOwningPredictedEntity(Node collider)
+    {
+        if (collider == null) return null;
+        var spawner = EntitySpawner.Instance;
+        if (spawner == null) return null;
+        for (int i = 0; i < spawner.ClientEntities.Count; i++)
+        {
+            var entity = spawner.ClientEntities[i];
+            var root = spawner.GetEntityRoot(entity);
+            if (root == null) continue;
+            // Match either the body == root OR root is an ancestor of the body
+            // (covers entities whose collider is a nested CollisionShape3D child
+            // rather than the root itself).
+            Node cursor = collider;
+            while (cursor != null)
+            {
+                if (cursor == root)
+                    return entity.GetComponent<ClientPredictedEntity>();
+                cursor = cursor.GetParent();
+            }
+        }
+        return null;
     }
 
     public override void OnProcessTick(int tick, IPackableElement input)
